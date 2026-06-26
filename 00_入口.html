@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C++ 面经学习包入口</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg:#f6f7f4;
+      --fg:#1f2933;
+      --muted:#667085;
+      --panel:#fff;
+      --line:#d9ded8;
+      --accent:#0f766e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#101413;
+        --fg:#eef2f1;
+        --muted:#a8b3ad;
+        --panel:#171f1c;
+        --line:#303b36;
+        --accent:#5eead4;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+    main {
+      width: min(980px, 100%);
+      margin: 0 auto;
+      padding: 26px 16px 40px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+    p { color: var(--muted); margin: 0 0 18px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    a.card {
+      display: block;
+      text-decoration: none;
+      color: var(--fg);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    a.card:hover { border-color: var(--accent); }
+    strong {
+      display: block;
+      font-size: 18px;
+      margin-bottom: 6px;
+    }
+    span { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>C++ 面经学习包</h1>
+    <p>单一主版本：297 题统一详解，包含代码/伪代码示例、底层原理、面试回答和追问方向。</p>
+    <div class="grid">
+      <a class="card" href="./00_使用总纲.md">
+        <strong>使用总纲</strong>
+        <span>先看这里，了解目录和学习顺序。</span>
+      </a>
+      <a class="card" href="./02_手机学习/手机统一详解版.html">
+        <strong>手机统一详解版</strong>
+        <span>297 张卡片，搜索、筛选、随机抽题、掌握进度。</span>
+      </a>
+      <a class="card" href="./01_统一详解版/电脑统一详解版.html">
+        <strong>电脑统一详解版</strong>
+        <span>电脑端连续阅读和搜索。</span>
+      </a>
+      <a class="card" href="./01_统一详解版/C++面经全量统一详解版.md">
+        <strong>全量 Markdown</strong>
+        <span>适合 VS Code、Typora、Obsidian。</span>
+      </a>
+      <a class="card" href="./03_代码示例/可学习代码实现讲解.md">
+        <strong>代码示例</strong>
+        <span>LRU、线程池、半包解析、KMP、Trie、并查集等。</span>
+      </a>
+      <a class="card" href="./04_模拟面试/项目追问与模拟面试.md">
+        <strong>模拟面试</strong>
+        <span>项目追问链和 45 分钟模拟面试脚本。</span>
+      </a>
+      <a class="card" href="./05_来源索引/来源索引与筛选记录.md">
+        <strong>来源索引</strong>
+        <span>参考来源、筛选规则和去重规则。</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>
