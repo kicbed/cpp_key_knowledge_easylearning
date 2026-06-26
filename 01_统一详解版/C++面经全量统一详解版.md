@@ -46,16 +46,27 @@
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：C++ 程序的内存区域怎么划分？
+int g_init = 1;            // 已初始化全局/静态数据
+int g_zero;                // BSS，零初始化
+static int file_static = 2;
+
+int main() {
+    static int local_static = 3;  // 静态存储期
+    int stack_value = 4;          // 栈
+    auto* heap_value = new int(5);// 堆/自由存储区
+    const char* literal = "cpp";  // 字符串字面量通常在只读区域
+    delete heap_value;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“C++ 程序的内存区域怎么划分？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `C++ 程序的内存区域怎么划分？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -119,25 +130,28 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：new/delete 和 malloc/free 有什么区别？
 struct T {
-    T()  { /* 构造对象状态 */ }
-    ~T() { /* 释放对象内部资源 */ }
+    T()  { std::cout << "construct\n"; }
+    ~T() { std::cout << "destruct\n"; }
 };
 
-T* a = new T();      // 分配内存 + 调用构造
-delete a;           // 调用析构 + 释放内存
+T* a = new T();      // 1. 分配原始内存 2. 调用构造函数
+delete a;           // 1. 调用析构函数 2. 释放内存
 
-void* raw = std::malloc(sizeof(T)); // 只拿到原始内存
-T* b = new (raw) T();               // placement new 手动构造
+void* raw = std::malloc(sizeof(T)); // 只拿到一块字节空间
+T* b = new (raw) T();               // placement new：在 raw 上构造对象
 b->~T();                            // 手动析构
 std::free(raw);                     // 释放原始内存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
-
-`malloc` 底层通常不是每次都直接向操作系统要内存。常见分配器会维护不同大小的空闲块，小对象从用户态堆缓存里切块；大块内存可能通过 `mmap`；堆不够时再用 `brk/sbrk` 或 `mmap` 扩展。`new` 通常会先调用 `operator new` 拿原始内存，再调用构造函数。
+围绕“new/delete 和 malloc/free 有什么区别？”，底层可以从下面几层理解：
+- `malloc` 通常先从用户态分配器维护的空闲链表、bin、arena 或线程缓存里找合适块，不一定每次都进内核。
+- 小块分配常由堆管理器切分和合并；大块分配可能直接走 `mmap`，释放后也更可能还给操作系统。
+- `new` 默认调用 `operator new` 获取原始内存，然后调用构造函数；`delete` 先析构对象，再调用 `operator delete`。
+- 所以 `malloc/free` 管的是字节，`new/delete` 管的是对象生命周期。混用会破坏分配器约定或跳过构造/析构。
 
 ### 面试回答版
 
@@ -201,21 +215,29 @@ RAII 不是垃圾回收。它是确定性的生命周期管理，释放时机通
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：RAII 是什么？为什么 C++ 面试很爱问？
+class FdGuard {
+public:
+    explicit FdGuard(int fd) : fd_(fd) {}
+    ~FdGuard() { if (fd_ >= 0) ::close(fd_); }
+    FdGuard(const FdGuard&) = delete;
+    FdGuard& operator=(const FdGuard&) = delete;
+private:
+    int fd_;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+void handle(int fd) {
+    FdGuard guard(fd);
+    // 中途 return 或抛异常，guard 析构都会 close(fd)
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“RAII 是什么？为什么 C++ 面试很爱问？”，底层可以从下面几层理解：
+- RAII 依赖 C++ 栈展开规则：离开作用域时，已构造完成的自动对象会按相反顺序析构。
+- 异常传播时同样会栈展开，因此锁、fd、内存等资源只要被对象持有，就能沿析构路径释放。
+- RAII 的核心是所有权封装，不是智能指针本身；文件描述符、mutex、事务句柄都可以用同样思想管理。
 
 ### 面试回答版
 
@@ -279,21 +301,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：指针和引用的区别？
+void maybe_use(int* p) {
+    if (p) *p += 1;      // 指针可以为空，需要检查
+}
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+void must_use(int& r) {
+    r += 1;             // 引用表达“必须绑定有效对象”
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“指针和引用的区别？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`指针和引用的区别？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -357,17 +381,27 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：const 常见用法怎么讲？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“const 常见用法怎么讲？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`const 常见用法怎么讲？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -431,21 +465,26 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：static 在 C++ 里有哪些含义？
+int next_id() {
+    static int id = 0; // C++11 起初始化线程安全
+    return ++id;
 }
+
+struct Counter {
+    static int total;
+    Counter() { ++total; }
+};
+int Counter::total = 0;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“static 在 C++ 里有哪些含义？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`static 在 C++ 里有哪些含义？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -509,21 +548,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：inline 的真实含义是什么？
+// 头文件里定义普通函数时，用 inline 避免多个翻译单元重复定义
+inline int add(int a, int b) {
+    return a + b;
 }
+
+// C++17 起也可用 inline variable
+inline constexpr int kPageSize = 4096;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“inline 的真实含义是什么？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`inline 的真实含义是什么？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -586,21 +627,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：extern 和头文件声明怎么理解？
+// a.h
+extern int g_count;       // 声明，不分配存储
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// a.cpp
+int g_count = 0;          // 唯一定义
+
+extern "C" int c_api(int); // 按 C ABI 暴露符号，避免 C++ 名字改编
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“extern 和头文件声明怎么理解？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`extern 和头文件声明怎么理解？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -664,21 +707,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：C++ 对象构造和析构顺序？
+struct Member {
+    explicit Member(const char* name) { std::cout << name << "\n"; }
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+struct Obj {
+    Member first;
+    Member second;
+    Obj() : second("second"), first("first") {}
+    // 实际先构造 first，再构造 second，因为按声明顺序
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“C++ 对象构造和析构顺序？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -742,19 +789,28 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
-}
+// 针对：拷贝构造、拷贝赋值、移动构造、移动赋值怎么区分？
+class Buffer {
+public:
+    Buffer(size_t n) : p_(new char[n]), n_(n) {}
+    ~Buffer() { delete[] p_; }
 
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
+    Buffer(Buffer&& other) noexcept : p_(other.p_), n_(other.n_) {
+        other.p_ = nullptr;
+        other.n_ = 0;
+    }
+private:
+    char* p_;
+    size_t n_;
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“拷贝构造、拷贝赋值、移动构造、移动赋值怎么区分？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -818,19 +874,23 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
-}
+// 针对：左值、右值、右值引用怎么讲？
+std::string a = "hello";
+std::string b = a;             // 拷贝，a 仍保持原内容
+std::string c = std::move(a);  // 允许移动 a 的内部资源
 
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
+void f(std::string&& s) {
+    use(s);             // s 有名字，所以表达式 s 是左值
+    use(std::move(s));  // 这里才按右值传出
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“左值、右值、右值引用怎么讲？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -897,19 +957,21 @@ std::unique_ptr<T> make_obj(Args&&... args) {
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
+// 针对：完美转发解决什么问题？
+template <class T, class... Args>
+std::unique_ptr<T> make_obj(Args&&... args) {
+    return std::unique_ptr<T>(
+        new T(std::forward<Args>(args)...)
+    );
 }
-
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“完美转发解决什么问题？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -973,12 +1035,14 @@ C++ 运行时多态通过基类指针或引用调用虚函数实现。对象的�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：虚函数、多态、虚表怎么回答？
 struct Base {
     virtual ~Base() = default;
-    virtual void run() { std::cout << "base\n"; }
+    virtual void run() { std::cout << "Base\n"; }
 };
+
 struct Derived : Base {
-    void run() override { std::cout << "derived\n"; }
+    void run() override { std::cout << "Derived\n"; }
 };
 
 std::unique_ptr<Base> p = std::make_unique<Derived>();
@@ -987,7 +1051,10 @@ p->run(); // 运行期派发到 Derived::run
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“虚函数、多态、虚表怎么回答？”，底层可以从下面几层理解：
+- 标准只规定动态派发语义，不规定对象里一定有虚表指针；虚表是主流 ABI 的实现方式。
+- 常见实现中，对象保存 vptr，vptr 指向该动态类型的 vtable，调用虚函数时通过表项间接跳转。
+- 构造/析构期间动态类型被限制在当前层级，因此虚函数不会派发到尚未构造或已经析构的派生类部分。
 
 ### 面试回答版
 
@@ -1049,12 +1116,14 @@ p->run(); // 运行期派发到 Derived::run
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：为什么多态基类析构函数要 virtual？
 struct Base {
     virtual ~Base() = default;
-    virtual void run() { std::cout << "base\n"; }
+    virtual void run() { std::cout << "Base\n"; }
 };
+
 struct Derived : Base {
-    void run() override { std::cout << "derived\n"; }
+    void run() override { std::cout << "Derived\n"; }
 };
 
 std::unique_ptr<Base> p = std::make_unique<Derived>();
@@ -1063,7 +1132,10 @@ p->run(); // 运行期派发到 Derived::run
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“为什么多态基类析构函数要 virtual？”，底层可以从下面几层理解：
+- 标准只规定动态派发语义，不规定对象里一定有虚表指针；虚表是主流 ABI 的实现方式。
+- 常见实现中，对象保存 vptr，vptr 指向该动态类型的 vtable，调用虚函数时通过表项间接跳转。
+- 构造/析构期间动态类型被限制在当前层级，因此虚函数不会派发到尚未构造或已经析构的派生类部分。
 
 ### 面试回答版
 
@@ -1127,21 +1199,26 @@ p->run(); // 运行期派发到 Derived::run
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：重载、重写、隐藏有什么区别？
+struct Base {
+    virtual void f(int) {}
+    void g(double) {}
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+struct Derived : Base {
+    using Base::g;        // 把基类重载集合引入当前作用域
+    void f(int) override {}
+    void g(int) {}
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“重载、重写、隐藏有什么区别？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`重载、重写、隐藏有什么区别？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1204,21 +1281,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：深拷贝和浅拷贝是什么？
+struct Owner {
+    int* p = new int(1);
+    ~Owner() { delete p; }
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+    Owner(const Owner& other) : p(new int(*other.p)) {} // 深拷贝
+    Owner& operator=(const Owner&) = delete;
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“深拷贝和浅拷贝是什么？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`深拷贝和浅拷贝是什么？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1276,21 +1355,26 @@ C++ 中 `struct` 和 `class` 能力基本相同，主要默认访问控制不同
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：struct 和 class 区别？
+struct PlainData {
+    int x;       // 默认 public
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+class Account {
+public:
+    int balance() const { return balance_; }
+private:
+    int balance_ = 0; // 默认 private，维护不变量
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“struct 和 class 区别？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`struct 和 class 区别？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1354,16 +1438,21 @@ CPU 访问某些对齐地址的数据更高效，甚至某些平台要求对齐�
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：内存对齐和 padding 怎么讲？
+struct A { char c; int x; };   // 通常有 padding
+struct B { int x; char c; };   // 可能更紧凑
+
+struct Empty {};
+struct Holder : Empty { int value; }; // 空基类优化可能让 Empty 不额外占空间
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“内存对齐和 padding 怎么讲？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `内存对齐和 padding 怎么讲？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -1427,12 +1516,14 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：模板是什么？编译期多态怎么理解？
 struct Base {
     virtual ~Base() = default;
-    virtual void run() { std::cout << "base\n"; }
+    virtual void run() { std::cout << "Base\n"; }
 };
+
 struct Derived : Base {
-    void run() override { std::cout << "derived\n"; }
+    void run() override { std::cout << "Derived\n"; }
 };
 
 std::unique_ptr<Base> p = std::make_unique<Derived>();
@@ -1441,7 +1532,10 @@ p->run(); // 运行期派发到 Derived::run
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“模板是什么？编译期多态怎么理解？”，底层可以从下面几层理解：
+- 标准只规定动态派发语义，不规定对象里一定有虚表指针；虚表是主流 ABI 的实现方式。
+- 常见实现中，对象保存 vptr，vptr 指向该动态类型的 vtable，调用虚函数时通过表项间接跳转。
+- 构造/析构期间动态类型被限制在当前层级，因此虚函数不会派发到尚未构造或已经析构的派生类部分。
 
 ### 面试回答版
 
@@ -1503,21 +1597,23 @@ C++11 是现代 C++ 分水岭，核心包括移动语义、右值引用、智能
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：C++11/14/17 高频特性怎么概括？
+std::optional<int> parse(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    return static_cast<int>(s.size());
 }
+
+constexpr int square(int x) { return x * x; }
+static_assert(square(4) == 16);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“C++11/14/17 高频特性怎么概括？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`C++11/14/17 高频特性怎么概括？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1575,18 +1671,18 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：volatile 在 C++ 里能保证线程安全吗？
+volatile int mmio_register;      // 适合内存映射 IO 一类场景
+std::atomic<bool> ready{false}; // 线程同步用 atomic，而不是 volatile
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“volatile 在 C++ 里能保证线程安全吗？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `volatile 在 C++ 里能保证线程安全吗？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -1649,21 +1745,21 @@ f(nullptr); // 调用 f(char*)
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：nullptr 比 NULL 好在哪里？
+void f(int);
+void f(char*);
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+f(nullptr); // 明确匹配指针版本
+// f(NULL); // 可能被当成 0，匹配 int 版本
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“nullptr 比 NULL 好在哪里？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`nullptr 比 NULL 好在哪里？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1721,17 +1817,27 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：宏、const、constexpr、inline 怎么选择？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“宏、const、constexpr、inline 怎么选择？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -1789,21 +1895,25 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：异常安全怎么回答？
+class Vec {
+public:
+    Vec(Vec&&) noexcept = default; // 容器扩容时更愿意移动
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+T make() {
+    T obj;
+    return obj; // 可能触发 NRVO/拷贝省略
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“异常安全怎么回答？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`异常安全怎么回答？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1863,21 +1973,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：string_view 有什么坑？
+std::optional<int> parse(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    return static_cast<int>(s.size());
 }
+
+constexpr int square(int x) { return x * x; }
+static_assert(square(4) == 16);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“string_view 有什么坑？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`string_view 有什么坑？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -1937,18 +2049,20 @@ vector 像一排连续座位。座位不够时要整体搬家，所以旧座位�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：vector 底层、扩容和迭代器失效？
 std::vector<int> v;
-v.reserve(100);          // 只改容量，不改 size
-auto old = v.data();
-for (int i = 0; i < 100; ++i) v.push_back(i);
-// 如果没有再次扩容，old 仍可能等于 v.data()
+v.reserve(100);     // 只预留容量，不构造元素
+auto* old = v.data();
+v.push_back(1);     // 如果触发扩容，old 会失效
+v.resize(10);       // 改变 size，可能构造新元素
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
-
-`vector` 的连续内存让 CPU 预取和缓存命中更好。扩容时需要分配新内存并移动/拷贝元素，所以旧地址失效。增长倍数是库实现策略，不是标准规定。
+围绕“vector 底层、扩容和迭代器失效？”，底层可以从下面几层理解：
+- `vector` 的核心优势是连续内存，CPU 缓存和预取友好，随机访问只需要基址加偏移。
+- 扩容时需要申请新连续空间，再移动或拷贝旧元素，因此旧指针、引用、迭代器会指向旧内存。
+- 增长倍数、SSO 阈值这类属于标准库实现策略，面试中要区分标准复杂度要求和实现细节。
 
 ### 面试回答版
 
@@ -2006,18 +2120,20 @@ vector 像一排连续座位。座位不够时要整体搬家，所以旧座位�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：list、deque、vector 怎么选？
 std::vector<int> v;
-v.reserve(100);          // 只改容量，不改 size
-auto old = v.data();
-for (int i = 0; i < 100; ++i) v.push_back(i);
-// 如果没有再次扩容，old 仍可能等于 v.data()
+v.reserve(100);     // 只预留容量，不构造元素
+auto* old = v.data();
+v.push_back(1);     // 如果触发扩容，old 会失效
+v.resize(10);       // 改变 size，可能构造新元素
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
-
-`vector` 的连续内存让 CPU 预取和缓存命中更好。扩容时需要分配新内存并移动/拷贝元素，所以旧地址失效。增长倍数是库实现策略，不是标准规定。
+围绕“list、deque、vector 怎么选？”，底层可以从下面几层理解：
+- `vector` 的核心优势是连续内存，CPU 缓存和预取友好，随机访问只需要基址加偏移。
+- 扩容时需要申请新连续空间，再移动或拷贝旧元素，因此旧指针、引用、迭代器会指向旧内存。
+- 增长倍数、SSO 阈值这类属于标准库实现策略，面试中要区分标准复杂度要求和实现细节。
 
 ### 面试回答版
 
@@ -2077,16 +2193,29 @@ unordered_map 像按哈希分柜子。平均查找快，但柜子分布不好或
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：map 和 unordered_map 区别？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“map 和 unordered_map 区别？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -2144,16 +2273,29 @@ map 像有序目录，查找不是最快的平均 O(1)，但顺序稳定，范�
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：红黑树为什么常用于 map？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“红黑树为什么常用于 map？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -2207,22 +2349,20 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：set 里元素为什么不能随便改？
+std::set<int> s{1, 3, 5};
+// 不能直接把 3 改成 4；key 变化会破坏树顺序
+s.erase(3);
+s.insert(4);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“set 里元素为什么不能随便改？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `set 里元素为什么不能随便改？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2282,22 +2422,26 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：智能指针怎么选？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“智能指针怎么选？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `智能指针怎么选？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2355,24 +2499,25 @@ p->child->parent = p;
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：shared_ptr 的线程安全怎么说？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
-
-`shared_ptr` 的关键不是指针本身，而是控制块。控制块里的强引用计数决定对象何时析构，弱引用计数决定控制块何时释放。计数增减通常要用原子操作，所以 shared_ptr 有一定并发和性能成本。
+围绕“shared_ptr 的线程安全怎么说？”，底层可以从下面几层理解：
+- `shared_ptr` 的关键是控制块，里面通常有强引用计数、弱引用计数、删除器和分配器信息。
+- 强计数归零时析构对象；弱计数也归零时控制块才释放。`weak_ptr` 能观察控制块，但不增加强计数。
+- `make_shared` 常把对象和控制块一次分配，减少分配次数；代价是弱引用存在时整块内存可能延后释放。
 
 ### 面试回答版
 
@@ -2438,24 +2583,25 @@ struct Parent {
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：shared_ptr 循环引用怎么解决？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
-
-`shared_ptr` 的关键不是指针本身，而是控制块。控制块里的强引用计数决定对象何时析构，弱引用计数决定控制块何时释放。计数增减通常要用原子操作，所以 shared_ptr 有一定并发和性能成本。
+围绕“shared_ptr 循环引用怎么解决？”，底层可以从下面几层理解：
+- `shared_ptr` 的关键是控制块，里面通常有强引用计数、弱引用计数、删除器和分配器信息。
+- 强计数归零时析构对象；弱计数也归零时控制块才释放。`weak_ptr` 能观察控制块，但不增加强计数。
+- `make_shared` 常把对象和控制块一次分配，减少分配次数；代价是弱引用存在时整块内存可能延后释放。
 
 ### 面试回答版
 
@@ -2509,16 +2655,25 @@ p->child->parent = p;
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：make_shared 有什么优缺点？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
+};
+
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“make_shared 有什么优缺点？”，底层可以从下面几层理解：
+- `shared_ptr` 的关键是控制块，里面通常有强引用计数、弱引用计数、删除器和分配器信息。
+- 强计数归零时析构对象；弱计数也归零时控制块才释放。`weak_ptr` 能观察控制块，但不增加强计数。
+- `make_shared` 常把对象和控制块一次分配，减少分配次数；代价是弱引用存在时整块内存可能延后释放。
 
 ### 面试回答版
 
@@ -2576,16 +2731,22 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-std::vector<int> v;
-v.reserve(100);          // 只改容量，不改 size
-auto old = v.data();
-for (int i = 0; i < 100; ++i) v.push_back(i);
-// 如果没有再次扩容，old 仍可能等于 v.data()
+// 针对：迭代器失效怎么系统回答？
+std::vector<int> v{1, 2, 3, 2, 4};
+v.erase(std::remove(v.begin(), v.end(), 2), v.end());
+
+for (auto it = v.begin(); it != v.end(); ) {
+    if (*it % 2 == 0) it = v.erase(it);
+    else ++it;
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“迭代器失效怎么系统回答？”，底层可以从下面几层理解：
+- `vector` 的核心优势是连续内存，CPU 缓存和预取友好，随机访问只需要基址加偏移。
+- 扩容时需要申请新连续空间，再移动或拷贝旧元素，因此旧指针、引用、迭代器会指向旧内存。
+- 增长倍数、SSO 阈值这类属于标准库实现策略，面试中要区分标准复杂度要求和实现细节。
 
 ### 面试回答版
 
@@ -2643,16 +2804,21 @@ for (int i = 0; i < 100; ++i) v.push_back(i);
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：emplace_back 一定比 push_back 快吗？
+std::vector<std::pair<int, std::string>> v;
+v.emplace_back(1, "cpp");          // 在容器内直接构造 pair
+
+std::pair<int, std::string> p{2, "os"};
+v.push_back(std::move(p));         // 已有对象时移动进去
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“emplace_back 一定比 push_back 快吗？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `emplace_back 一定比 push_back 快吗？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2706,16 +2872,20 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：std::sort 和稳定排序？
+std::vector<std::pair<int, char>> v{{1,'a'}, {1,'b'}, {0,'c'}};
+std::stable_sort(v.begin(), v.end(),
+    [](auto& x, auto& y) { return x.first < y.first; });
+// first 相等时，a 和 b 的相对顺序保持
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“std::sort 和稳定排序？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `std::sort 和稳定排序？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2773,16 +2943,19 @@ SSO 是 Small String Optimization，小字符串优化。许多标准库实现�
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：std::string 的 SSO 是什么？
+std::string a = "short";
+std::string b(1000, 'x');
+// 是否使用 SSO、阈值是多少，都是标准库实现细节，不能写业务依赖
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“std::string 的 SSO 是什么？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `std::string 的 SSO 是什么？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2840,16 +3013,19 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：内存泄漏怎么定位？
+std::unique_ptr<int> p = std::make_unique<int>(42); // 用所有权类型减少泄漏
+int* raw = p.get();  // raw 只是观察，不负责 delete
+p.reset();           // raw 此后悬空，不能再解引用
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“内存泄漏怎么定位？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `内存泄漏怎么定位？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2903,16 +3079,19 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：野指针、悬空指针、内存越界怎么避免？
+std::unique_ptr<int> p = std::make_unique<int>(42); // 用所有权类型减少泄漏
+int* raw = p.get();  // raw 只是观察，不负责 delete
+p.reset();           // raw 此后悬空，不能再解引用
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“野指针、悬空指针、内存越界怎么避免？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `野指针、悬空指针、内存越界怎么避免？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -2966,25 +3145,22 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-struct T {
-    T()  { /* 构造对象状态 */ }
-    ~T() { /* 释放对象内部资源 */ }
+// 针对：delete this 可以吗？
+struct SelfOwned {
+    void release() {
+        delete this;
+        // 之后不能再访问任何成员，也不能让外部继续使用 this
+    }
 };
-
-T* a = new T();      // 分配内存 + 调用构造
-delete a;           // 调用析构 + 释放内存
-
-void* raw = std::malloc(sizeof(T)); // 只拿到原始内存
-T* b = new (raw) T();               // placement new 手动构造
-b->~T();                            // 手动析构
-std::free(raw);                     // 释放原始内存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
-
-`malloc` 底层通常不是每次都直接向操作系统要内存。常见分配器会维护不同大小的空闲块，小对象从用户态堆缓存里切块；大块内存可能通过 `mmap`；堆不够时再用 `brk/sbrk` 或 `mmap` 扩展。`new` 通常会先调用 `operator new` 拿原始内存，再调用构造函数。
+围绕“delete this 可以吗？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `delete this 可以吗？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -3048,25 +3224,19 @@ p->~T();
 ### 代码/伪代码示例
 
 ```cpp
-struct T {
-    T()  { /* 构造对象状态 */ }
-    ~T() { /* 释放对象内部资源 */ }
-};
-
-T* a = new T();      // 分配内存 + 调用构造
-delete a;           // 调用析构 + 释放内存
-
-void* raw = std::malloc(sizeof(T)); // 只拿到原始内存
-T* b = new (raw) T();               // placement new 手动构造
-b->~T();                            // 手动析构
-std::free(raw);                     // 释放原始内存
+// 针对：placement new 用在什么场景？
+alignas(T) unsigned char storage[sizeof(T)];
+T* p = new (storage) T(/* args */); // 在已有内存上构造
+p->~T();                            // 手动析构
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
-
-`malloc` 底层通常不是每次都直接向操作系统要内存。常见分配器会维护不同大小的空闲块，小对象从用户态堆缓存里切块；大块内存可能通过 `mmap`；堆不够时再用 `brk/sbrk` 或 `mmap` 扩展。`new` 通常会先调用 `operator new` 拿原始内存，再调用构造函数。
+围绕“placement new 用在什么场景？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `placement new 用在什么场景？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -3124,18 +3294,24 @@ std::free(raw);                     // 释放原始内存
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：进程和线程区别？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“进程和线程区别？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `进程和线程区别？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -3193,18 +3369,24 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：协程和线程区别？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“协程和线程区别？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `协程和线程区别？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -3263,17 +3445,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：fork 后父子进程发生什么？
 pid_t pid = fork();
 if (pid == 0) {
-    // 子进程：返回 0
+    // child
+    _exit(0);
 } else if (pid > 0) {
-    // 父进程：返回子进程 pid
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“fork 后父子进程发生什么？”，底层可以从下面几层理解：
+- 进程看到的是虚拟地址，CPU 通过页表和 TLB 转换到物理地址。
+- fork 通常复制页表而不是立即复制全部物理页，父子进程写共享页时触发写时复制。
+- `mmap` 把文件或匿名内存映射到虚拟地址空间，第一次访问可能缺页，由内核加载或分配页面。
 
 ### 面试回答版
 
@@ -3331,18 +3519,18 @@ TLB 缓存虚拟页到物理页的转换，减少页表访问开销；缺页异�
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：虚拟内存有什么作用？
+int stack_value = 1;
+auto heap_value = std::make_unique<int>(2);
+// 第一次访问某些虚拟页时，可能触发缺页，由内核建立映射
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“虚拟内存有什么作用？”，底层可以从下面几层理解：
+- 进程看到的是虚拟地址，CPU 通过页表和 TLB 转换到物理地址。
+- fork 通常复制页表而不是立即复制全部物理页，父子进程写共享页时触发写时复制。
+- `mmap` 把文件或匿名内存映射到虚拟地址空间，第一次访问可能缺页，由内核加载或分配页面。
 
 ### 面试回答版
 
@@ -3400,18 +3588,19 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：堆和栈区别？
+int stack_value = 1;
+auto heap_value = std::make_unique<int>(2);
+// 第一次访问某些虚拟页时，可能触发缺页，由内核建立映射
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“堆和栈区别？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `堆和栈区别？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -3469,18 +3658,21 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：互斥锁、自旋锁、读写锁怎么选？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“互斥锁、自旋锁、读写锁怎么选？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -3541,18 +3733,22 @@ cv.wait(lk, [&]{ return !q.empty() || stopped; });
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：条件变量为什么要配合 while？
 std::unique_lock<std::mutex> lk(mu);
-cv.wait(lk, [&] {
-    return stopped || !queue.empty();
+not_empty.wait(lk, [&] {
+    return closed || !queue.empty();
 });
-if (stopped && queue.empty()) return;
-auto task = std::move(queue.front());
+if (queue.empty() && closed) return false;
+out = std::move(queue.front());
 queue.pop();
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“条件变量为什么要配合 while？”，底层可以从下面几层理解：
+- 条件变量底层会把线程挂到等待队列，并在 wait 时原子地释放互斥锁和阻塞当前线程。
+- 被唤醒后线程要重新抢锁；抢到锁后条件也可能已经被其他线程改变，所以必须用 predicate/while。
+- notify 不是发送数据，只是提示状态可能变化；真正的状态必须由受锁保护的共享变量表达。
 
 ### 面试回答版
 
@@ -3606,18 +3802,21 @@ queue.pop();
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：死锁产生条件和避免方式？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“死锁产生条件和避免方式？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `死锁产生条件和避免方式？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -3675,19 +3874,27 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-data = 42;
-ready.store(true, std::memory_order_release);
+// 针对：原子操作和内存序怎么回答？
+std::atomic<bool> ready{false};
+int data = 0;
 
-if (ready.load(std::memory_order_acquire)) {
-    // 能看到 release 之前写入的 data
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+void consumer() {
+    if (ready.load(std::memory_order_acquire)) {
+        assert(data == 42);
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
-
-原子操作不仅是“不能被打断”，还涉及 CPU 缓存之间的可见性和编译器/CPU 重排约束。不同 memory_order 本质是在性能和顺序保证之间取舍。
+围绕“原子操作和内存序怎么回答？”，底层可以从下面几层理解：
+- C++ 数据竞争是未定义行为，不只是读到旧值；编译器可以基于“没有数据竞争”的假设做优化。
+- atomic 提供原子读写和内存序约束，release/acquire 建立跨线程可见性关系。
+- 内存序越弱，性能潜力越高，但推理成本越大；工程中默认用锁或 `seq_cst` 更稳。
 
 ### 面试回答版
 
@@ -3741,18 +3948,27 @@ if (ready.load(std::memory_order_acquire)) {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
+// 针对：什么是数据竞争？
+std::atomic<bool> ready{false};
+int data = 0;
 
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+void consumer() {
+    if (ready.load(std::memory_order_acquire)) {
+        assert(data == 42);
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“什么是数据竞争？”，底层可以从下面几层理解：
+- C++ 数据竞争是未定义行为，不只是读到旧值；编译器可以基于“没有数据竞争”的假设做优化。
+- atomic 提供原子读写和内存序约束，release/acquire 建立跨线程可见性关系。
+- 内存序越弱，性能潜力越高，但推理成本越大；工程中默认用锁或 `seq_cst` 更稳。
 
 ### 面试回答版
 
@@ -3810,24 +4026,27 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：线程池怎么设计？
 while (true) {
     std::function<void()> task;
     {
         std::unique_lock<std::mutex> lk(mu);
-        cv.wait(lk, [&]{ return stopped || !tasks.empty(); });
+        cv.wait(lk, [&] { return stopped || !tasks.empty(); });
         if (stopped && tasks.empty()) break;
         task = std::move(tasks.front());
         tasks.pop();
     }
-    task();
+    task(); // 不要持锁执行任务
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-线程池底层依赖条件变量的阻塞/唤醒和任务队列的互斥保护。真正容易错的是停止状态与队列状态的组合，而不是创建线程本身。
+围绕“线程池怎么设计？”，底层可以从下面几层理解：
+- 线程池底层是固定 worker、任务队列、条件变量和停止标志的组合。
+- worker 不能持锁执行任务，否则任务耗时会阻塞其他线程取任务。
+- 退出条件必须同时看 `stopped` 和队列是否为空，否则会丢任务或无法退出。
+- 工程版本还要考虑队列容量、拒绝策略、慢任务隔离和任务异常传播。
 
 ### 面试回答版
 
@@ -3885,24 +4104,22 @@ epoll 像把关注列表交给内核保管，事件来了只把活跃 fd 告诉�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：select、poll、epoll 区别？
 for (;;) {
     ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-`epoll` 把关注的 fd 集合留在内核中，事件到来时把就绪项挂到就绪队列。ET 模式减少重复通知，但要求用户态一次处理到 `EAGAIN`，否则内核不一定再次提醒。
+围绕“select、poll、epoll 区别？”，底层可以从下面几层理解：
+- select/poll 每次调用都要把关注集合交给内核，并扫描集合找就绪项。
+- epoll 把关注集合保存在内核，fd 状态变化时把事件放进就绪队列，用户态取活跃事件。
+- LT 是条件满足就持续通知；ET 是状态变化才通知，必须配非阻塞 fd 并处理到 EAGAIN。
 
 ### 面试回答版
 
@@ -3960,18 +4177,23 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：同步/异步、阻塞/非阻塞怎么区分？
+for (;;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“同步/异步、阻塞/非阻塞怎么区分？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `同步/异步、阻塞/非阻塞怎么区分？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -4025,18 +4247,22 @@ Reactor 是“就绪事件通知”：内核告诉你 fd 可读/可写，应用�
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：Reactor 和 Proactor 区别？
+for (;;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“Reactor 和 Proactor 区别？”，底层可以从下面几层理解：
+- select/poll 每次调用都要把关注集合交给内核，并扫描集合找就绪项。
+- epoll 把关注集合保存在内核，fd 状态变化时把事件放进就绪队列，用户态取活跃事件。
+- LT 是条件满足就持续通知；ET 是状态变化才通知，必须配非阻塞 fd 并处理到 EAGAIN。
 
 ### 面试回答版
 
@@ -4089,19 +4315,20 @@ void add() {
 
 ### 代码/伪代码示例
 
-```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+```bash
+# 针对：用户态和内核态为什么要区分？
+strace -f -p <pid>        # 看系统调用和阻塞点
+ls -l /proc/<pid>/fd     # 看 fd 指向的打开文件/Socket
+cat /proc/<pid>/status   # 看线程、内存、上下文切换等状态
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“用户态和内核态为什么要区分？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -4161,16 +4388,29 @@ map 像有序目录，查找不是最快的平均 O(1)，但顺序稳定，范�
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：mmap 和普通 read/write 区别？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“mmap 和普通 read/write 区别？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -4229,26 +4469,34 @@ TCP 只保证一条可靠字节流，不知道你的业务消息从哪里开始�
 
 同时双方交换初始序列号。
 
-**面试回答版：**
-
-三次握手用于确认双方收发能力并同步初始序列号。两次握手无法让服务端确认客户端收到了自己的 SYN+ACK，也更容易受历史失效连接请求影响。
-
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP 三次握手为什么不是两次？
+Client CLOSED                         Server LISTEN
+Client -> SYN, seq=x              ->  收到后进入 SYN_RCVD
+Client <- SYN+ACK, seq=y, ack=x+1 <-  Server 证明自己能收、能发
+Client -> ACK, ack=y+1            ->  Server 确认 Client 能收
+
+两次握手缺口：Server 发出的 SYN+ACK 是否被 Client 收到，Server 不知道。
+三次握手补齐：双方收发能力 + 双方初始序列号都被确认。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“TCP 三次握手为什么不是两次？”，底层可以从下面几层理解：
+- 三次握手本质是在不可靠网络上建立一条可靠连接的初始状态：双方都要确认对方能收、能发，并同步各自的初始序列号 ISN。
+- 第一次 SYN 只能证明客户端能发、服务端能收；第二次 SYN+ACK 让客户端知道服务端能收能发；第三次 ACK 才让服务端知道客户端能收。
+- 如果只有两次，服务端无法确认自己的 SYN+ACK 是否到达客户端，历史延迟 SYN 也更容易让服务端误建连接并占用半连接/全连接资源。
+- 内核层面会经历 SYN 队列、连接状态迁移和 accept 队列；面试追问常会落到 backlog、SYN flood、半连接队列和超时重传。
 
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+### 面试回答版
+
+三次握手用于确认双方收发能力并同步初始序列号。第一次客户端发 SYN，服务端确认客户端能发；第二次服务端发 SYN+ACK，客户端确认服务端能收能发；第三次客户端发 ACK，服务端确认客户端能收。两次握手缺少最后这个确认，也更难处理历史失效连接请求。
+
+### 易错点
+
+不要只背“SYN、SYN+ACK、ACK”。面试官更看重你能否说清每一次握手确认了什么、初始序列号为什么必须同步，以及历史失效报文为什么可能干扰新连接。
 
 ### 面试官可能继续追问
 
@@ -4291,20 +4539,23 @@ TCP 是全双工，双方发送方向要分别关闭。主动关闭方发 FIN，
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP 四次挥手和 TIME_WAIT？
+主动关闭方：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+被动关闭方：CLOSE_WAIT -> LAST_ACK -> CLOSED
+
+TIME_WAIT 观察：
+ss -tan state time-wait
+用途：重发最后 ACK；等待旧报文过期，避免影响相同四元组的新连接。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP 四次挥手和 TIME_WAIT？”，底层可以从下面几层理解：
+- TCP 是全双工，读方向和写方向要分别关闭，所以一方 FIN 只表示“我不再发送”，不等于对方也没有数据要发。
+- TIME_WAIT 在主动关闭方出现，核心作用是保留连接四元组一段时间，确保最后 ACK 可重传，并让旧报文在网络中自然消失。
+- 大量 TIME_WAIT 不一定是问题，要结合连接创建速率、端口范围、复用策略和服务端/客户端角色判断。
+- CLOSE_WAIT 更值得警惕，通常表示对端已关闭，而本进程没有及时 close，可能是代码忘记释放连接。
 
 ### 面试回答版
 
@@ -4361,20 +4612,20 @@ TCP 通过序列号、确认应答、超时重传、快速重传、校验和、�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP 如何保证可靠传输？
+三次握手：CLOSED -> SYN_SENT -> ESTABLISHED
+四次挥手：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+排查连接：ss -tan state time-wait
+服务端参数：somaxconn / tcp_max_syn_backlog / ulimit -n
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP 如何保证可靠传输？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -4432,21 +4683,22 @@ UDP 有报文边界，但也可能丢包、乱序、截断；TCP 不丢边界是
 ### 代码/伪代码示例
 
 ```cpp
-// 4 字节长度 + body
-if (buffer.size() >= 4) {
+// 针对：TCP 粘包/拆包是什么？怎么解决？
+while (buffer.size() >= 4) {
     uint32_t len = read_uint32_be(buffer.data());
-    if (buffer.size() >= 4 + len) {
-        std::string frame = buffer.substr(4, len);
-        buffer.erase(0, 4 + len);
-    }
+    if (len > kMaxFrame) throw ProtocolError();
+    if (buffer.size() < 4 + len) break; // 半包，继续等数据
+    handle_frame(buffer.substr(4, len));
+    buffer.erase(0, 4 + len);
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP 粘包/拆包是什么？怎么解决？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -4499,20 +4751,20 @@ TCP 面向连接、可靠、有序、字节流，有拥塞控制，适合文件�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP 和 UDP 区别？
+三次握手：CLOSED -> SYN_SENT -> ESTABLISHED
+四次挥手：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+排查连接：ss -tan state time-wait
+服务端参数：somaxconn / tcp_max_syn_backlog / ulimit -n
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP 和 UDP 区别？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -4565,18 +4817,19 @@ HTTP 明文传输，HTTPS 是 HTTP over TLS，提供加密、身份认证和完�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：HTTP 和 HTTPS 区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“HTTP 和 HTTPS 区别？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -4629,18 +4882,19 @@ HTTP/1.1 支持长连接和管线化，但队头阻塞问题明显。HTTP/2 基�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：HTTP/1.1、HTTP/2、HTTP/3 区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“HTTP/1.1、HTTP/2、HTTP/3 区别？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -4693,18 +4947,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：HTTPS 证书验证大概流程？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“HTTPS 证书验证大概流程？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -4757,18 +5012,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：DNS 查询过程？
+浏览器缓存 -> hosts -> 本地递归 DNS -> 根 DNS -> TLD DNS -> 权威 DNS
+常见记录：A / AAAA / CNAME / MX / TXT
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“DNS 查询过程？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -4822,22 +5078,19 @@ TCP 服务端通常是 `socket` 创建 fd，`bind` 绑定 IP/端口，`listen` �
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：socket 服务端基本流程？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“socket 服务端基本流程？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -4891,19 +5144,18 @@ Nagle 算法用于减少小包数量：在未收到前一个小包 ACK 前，尽
 ### 代码/伪代码示例
 
 ```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+// 针对：Nagle 算法和 TCP_NODELAY？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“Nagle 算法和 TCP_NODELAY？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -4959,17 +5211,19 @@ TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。�
 ### 代码/伪代码示例
 
 ```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+// 针对：服务端连接数上不去可能查什么？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“服务端连接数上不去可能查什么？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -5023,20 +5277,24 @@ B+ 树扇出高，树高低，适合磁盘/页式存储，能减少 IO 次数。
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：InnoDB 为什么用 B+ 树索引？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载页。B+ 树扇出高，树高通常较低，所以一次查找需要的随机 IO 更少。
+围绕“InnoDB 为什么用 B+ 树索引？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -5090,20 +5348,24 @@ InnoDB 表数据按主键聚簇索引组织，叶子节点保存整行数据。�
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：聚簇索引和二级索引区别？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载页。B+ 树扇出高，树高通常较低，所以一次查找需要的随机 IO 更少。
+围绕“聚簇索引和二级索引区别？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -5161,18 +5423,24 @@ InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：最左前缀原则怎么讲？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“最左前缀原则怎么讲？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -5226,18 +5494,20 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
-SELECT user_id, created_at
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+-- 针对：MySQL 事务 ACID？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MySQL 事务 ACID？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -5295,17 +5565,20 @@ MVCC 是多版本并发控制。InnoDB 为记录维护隐藏字段和 undo log �
 ### 代码/伪代码示例
 
 ```sql
+-- 针对：MVCC 是什么？
 START TRANSACTION;
-SELECT * FROM account WHERE id = 1; -- 快照读
+SELECT * FROM account WHERE id = 1;            -- 快照读
 SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
 COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-MVCC 的底层关键是 undo log 版本链和 read view。读事务不是简单读当前值，而是沿版本链找到对自己可见的版本。
+围绕“MVCC 是什么？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -5359,17 +5632,21 @@ MVCC 的底层关键是 undo log 版本链和 read view。读事务不是简单�
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+-- 针对：快照读和当前读？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“快照读和当前读？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `快照读和当前读？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -5427,17 +5704,20 @@ MVCC 解决的是普通快照读的幻读表现；当前读要靠锁机制。
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+-- 针对：间隙锁、临键锁解决什么？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“间隙锁、临键锁解决什么？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -5491,20 +5771,24 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：索引失效常见原因？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载页。B+ 树扇出高，树高通常较低，所以一次查找需要的随机 IO 更少。
+围绕“索引失效常见原因？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -5562,20 +5846,21 @@ Redis 对外的数据类型和内部编码不同，内部编码会随版本、�
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 常见数据结构和场景？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 常见数据结构和场景？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5629,20 +5914,21 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 为什么快？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 为什么快？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5695,20 +5981,19 @@ Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令
 
 ### 代码/伪代码示例
 
-```cpp
-if (!bloom.mightContain(key)) {
-    return NotFound; // 拦截明显不存在的数据
-}
-auto val = cache.get(key);
-if (!val) {
-    val = load_from_db_with_mutex(key);
-    cache.set(key, val, ttl_with_jitter());
-}
+```text
+针对：缓存穿透、击穿、雪崩？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“缓存穿透、击穿、雪崩？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5766,20 +6051,21 @@ Redis 分布式锁不等于强一致锁。跨主从故障切换可能有安全�
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 分布式锁怎么写才相对可靠？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 分布式锁怎么写才相对可靠？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5833,20 +6119,21 @@ RDB 是某个时间点的数据快照，文件紧凑、恢复快，但两次快�
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis RDB 和 AOF？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis RDB 和 AOF？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5900,20 +6187,21 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 过期删除和内存淘汰？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 过期删除和内存淘汰？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -5967,14 +6255,21 @@ MQ 用于削峰、异步解耦、缓冲、最终一致性。面试常追问消�
 ### 代码/伪代码示例
 
 ```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+-- 针对：消息队列为什么会被问？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“消息队列为什么会被问？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -6028,14 +6323,21 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 ### 代码/伪代码示例
 
 ```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+-- 针对：幂等怎么设计？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“幂等怎么设计？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -6088,14 +6390,24 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 
 ### 代码/伪代码示例
 
-```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+```cpp
+// 针对：限流算法有哪些？
+tokens = std::min(capacity, tokens + rate * elapsed_seconds);
+if (tokens >= 1) {
+    tokens -= 1;
+    allow();
+} else {
+    reject_or_wait();
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“限流算法有哪些？”，底层可以从下面几层理解：
+- 这题属于项目题，围绕 `限流算法有哪些？` 要把背景、约束、方案、指标和复盘连起来，而不是只说用了某个技术。
+- 底层要落到请求链路：入口、鉴权、限流、业务处理、缓存/数据库/MQ、返回、日志和监控。
+- 能体现真实性的是证据：压测数据、线上指标、一次 bug、一个权衡、一个没选的方案。
+- 回答时要控制边界，先讲自己负责的部分，再承认系统限制和下一步优化，避免被引到完全没做过的方向。
 
 ### 面试回答版
 
@@ -6151,16 +6463,18 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：一致性哈希解决什么？
+auto it = ring.lower_bound(hash(key));
+if (it == ring.end()) it = ring.begin();
+Node* target = it->second; // key 顺时针找到第一个虚拟节点
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“一致性哈希解决什么？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -6218,13 +6532,20 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：C++ WebServer 项目通常怎么介绍？
+accept -> set_nonblock -> epoll add
+read event -> read buffer -> parse HTTP
+business -> thread pool
+write event -> output buffer -> keep-alive or close
+timeout timer -> close idle connection
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“C++ WebServer 项目通常怎么介绍？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -6278,24 +6599,27 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：线程池项目怎么答得像自己写过？
 while (true) {
     std::function<void()> task;
     {
         std::unique_lock<std::mutex> lk(mu);
-        cv.wait(lk, [&]{ return stopped || !tasks.empty(); });
+        cv.wait(lk, [&] { return stopped || !tasks.empty(); });
         if (stopped && tasks.empty()) break;
         task = std::move(tasks.front());
         tasks.pop();
     }
-    task();
+    task(); // 不要持锁执行任务
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-线程池底层依赖条件变量的阻塞/唤醒和任务队列的互斥保护。真正容易错的是停止状态与队列状态的组合，而不是创建线程本身。
+围绕“线程池项目怎么答得像自己写过？”，底层可以从下面几层理解：
+- 线程池底层是固定 worker、任务队列、条件变量和停止标志的组合。
+- worker 不能持锁执行任务，否则任务耗时会阻塞其他线程取任务。
+- 退出条件必须同时看 `stopped` 和队列是否为空，否则会丢任务或无法退出。
+- 工程版本还要考虑队列容量、拒绝策略、慢任务隔离和任务异常传播。
 
 ### 面试回答版
 
@@ -6349,14 +6673,19 @@ while (true) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：内存池项目常见追问？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“内存池项目常见追问？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -6413,14 +6742,20 @@ while (true) {
 
 ### 代码/伪代码示例
 
-```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+```bash
+# 针对：如何回答“项目性能优化做了什么”？
+wrk -t4 -c200 -d30s http://127.0.0.1:8080/
+perf record -F 99 -p <pid> -g -- sleep 30
+perf report
+# 记录 QPS、P95/P99、CPU、内存、上下文切换
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“如何回答“项目性能优化做了什么”？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -6474,13 +6809,20 @@ while (true) {
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：面试官问“你项目最难的点”怎么答？
+回答结构：
+背景：项目目标/约束是什么
+动作：你做了哪一块，为什么这样选
+证据：指标、日志、压测或 bug 复盘
+边界：不足、替代方案、下一步优化
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“面试官问“你项目最难的点”怎么答？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -6536,13 +6878,20 @@ while (true) {
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：简历项目如何避免被越问越偏？
+回答结构：
+背景：项目目标/约束是什么
+动作：你做了哪一块，为什么这样选
+证据：指标、日志、压测或 bug 复盘
+边界：不足、替代方案、下一步优化
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“简历项目如何避免被越问越偏？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -6596,17 +6945,27 @@ while (true) {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：static_cast、dynamic_cast、const_cast、reinterpret_cast 区别？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“static_cast、dynamic_cast、const_cast、reinterpret_cast 区别？”，底层可以从下面几层理解：
+- 类型转换题要先区分“编译期允许”和“运行期真的安全”。`static_cast` 依赖静态类型关系，`dynamic_cast` 需要多态类型的运行期信息。
+- `reinterpret_cast` 基本只改变编译器解释这段比特的方式，不保证对象真实可按目标类型访问；这会牵涉严格别名、对齐和对象生命周期。
+- `const_cast` 只能改变 cv 限定视角，如果原对象本来就是 const，再通过去 const 后的引用修改就是未定义行为。
+- 底层追问常落到 ABI：多态对象通常携带 vptr，运行时可借助类型信息判断向下转型是否有效。
 
 ### 面试回答版
 
@@ -6658,21 +7017,24 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：RTTI 是什么？什么时候用？
+struct Base { virtual ~Base() = default; };
+struct Derived : Base { void only_derived(); };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+void handle(Base* p) {
+    if (auto* d = dynamic_cast<Derived*>(p)) {
+        d->only_derived(); // 运行期确认真实类型后再向下使用
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“RTTI 是什么？什么时候用？”，底层可以从下面几层理解：
+- 类型转换题要先区分“编译期允许”和“运行期真的安全”。`static_cast` 依赖静态类型关系，`dynamic_cast` 需要多态类型的运行期信息。
+- `reinterpret_cast` 基本只改变编译器解释这段比特的方式，不保证对象真实可按目标类型访问；这会牵涉严格别名、对齐和对象生命周期。
+- `const_cast` 只能改变 cv 限定视角，如果原对象本来就是 const，再通过去 const 后的引用修改就是未定义行为。
+- 底层追问常落到 ABI：多态对象通常携带 vptr，运行时可借助类型信息判断向下转型是否有效。
 
 ### 面试回答版
 
@@ -6731,21 +7093,24 @@ struct A {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：explicit 解决什么问题？
+struct UserId {
+    explicit UserId(int v) : value(v) {}
+    int value;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+void load(UserId id);
+// load(10);        // 编译失败：不能隐式把 int 变成 UserId
+load(UserId{10}); // 调用者必须明确表达转换意图
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“explicit 解决什么问题？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -6797,21 +7162,26 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：friend 是不是破坏封装？
+class Money {
+    friend Money operator+(Money a, Money b);
+    int cents_ = 0;
+public:
+    explicit Money(int cents) : cents_(cents) {}
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+Money operator+(Money a, Money b) {
+    return Money(a.cents_ + b.cents_); // 只开放这个函数访问内部表示
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“friend 是不是破坏封装？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -6863,21 +7233,26 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：enum 和 enum class 区别？
+struct PlainData {
+    int x;       // 默认 public
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+class Account {
+public:
+    int balance() const { return balance_; }
+private:
+    int balance_ = 0; // 默认 private，维护不变量
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“enum 和 enum class 区别？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -6931,21 +7306,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：C++ 中 sizeof 一个空类为什么通常不是 0？
+struct A { char c; int x; };   // 通常有 padding
+struct B { int x; char c; };   // 可能更紧凑
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+struct Empty {};
+struct Holder : Empty { int value; }; // 空基类优化可能让 Empty 不额外占空间
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“C++ 中 sizeof 一个空类为什么通常不是 0？”，底层可以从下面几层理解：
+- 继承相关题要分清“接口复用”和“对象布局”。基类子对象真实存在于派生对象内部，按值拷贝到基类对象时会发生切片。
+- 空类通常也要占至少 1 字节，因为两个不同对象需要有不同地址；空基类优化则利用基类子对象规则减少无状态类型开销。
+- 虚继承把共享基类提升为一份虚基类子对象，解决菱形继承的重复基类问题，但会增加访问间接性和对象布局复杂度。
+- 这类题不要死背大小，标准没有规定具体布局；面试回答应把标准语义和主流 ABI 实现分开讲。
 
 ### 面试回答版
 
@@ -6996,14 +7371,22 @@ void f() {
 
 ### 代码/伪代码示例
 
-```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+```cpp
+// 针对：空基类优化 EBO 是什么？
+struct A { char c; int x; };   // 通常有 padding
+struct B { int x; char c; };   // 可能更紧凑
+
+struct Empty {};
+struct Holder : Empty { int value; }; // 空基类优化可能让 Empty 不额外占空间
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“空基类优化 EBO 是什么？”，底层可以从下面几层理解：
+- 继承相关题要分清“接口复用”和“对象布局”。基类子对象真实存在于派生对象内部，按值拷贝到基类对象时会发生切片。
+- 空类通常也要占至少 1 字节，因为两个不同对象需要有不同地址；空基类优化则利用基类子对象规则减少无状态类型开销。
+- 虚继承把共享基类提升为一份虚基类子对象，解决菱形继承的重复基类问题，但会增加访问间接性和对象布局复杂度。
+- 这类题不要死背大小，标准没有规定具体布局；面试回答应把标准语义和主流 ABI 实现分开讲。
 
 ### 面试回答版
 
@@ -7055,21 +7438,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：虚继承解决什么问题？
+struct A { int id = 0; };
+struct B : virtual A {};
+struct C : virtual A {};
+struct D : B, C {};
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+D d;
+d.id = 42; // D 中只有一份虚基类 A 子对象
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“虚继承解决什么问题？”，底层可以从下面几层理解：
+- 继承相关题要分清“接口复用”和“对象布局”。基类子对象真实存在于派生对象内部，按值拷贝到基类对象时会发生切片。
+- 空类通常也要占至少 1 字节，因为两个不同对象需要有不同地址；空基类优化则利用基类子对象规则减少无状态类型开销。
+- 虚继承把共享基类提升为一份虚基类子对象，解决菱形继承的重复基类问题，但会增加访问间接性和对象布局复杂度。
+- 这类题不要死背大小，标准没有规定具体布局；面试回答应把标准语义和主流 ABI 实现分开讲。
 
 ### 面试回答版
 
@@ -7121,21 +7506,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：菱形继承会带来什么问题？
+struct A { int id = 0; };
+struct B : virtual A {};
+struct C : virtual A {};
+struct D : B, C {};
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+D d;
+d.id = 42; // D 中只有一份虚基类 A 子对象
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“菱形继承会带来什么问题？”，底层可以从下面几层理解：
+- 继承相关题要分清“接口复用”和“对象布局”。基类子对象真实存在于派生对象内部，按值拷贝到基类对象时会发生切片。
+- 空类通常也要占至少 1 字节，因为两个不同对象需要有不同地址；空基类优化则利用基类子对象规则减少无状态类型开销。
+- 虚继承把共享基类提升为一份虚基类子对象，解决菱形继承的重复基类问题，但会增加访问间接性和对象布局复杂度。
+- 这类题不要死背大小，标准没有规定具体布局；面试回答应把标准语义和主流 ABI 实现分开讲。
 
 ### 面试回答版
 
@@ -7187,21 +7574,22 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：C++ 对象切片是什么？
+struct Base { virtual ~Base() = default; int b = 1; };
+struct Derived : Base { int d = 2; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+Derived x;
+Base sliced = x;   // 只拷贝 Base 子对象，Derived 部分被切掉
+Base& ref = x;     // 引用/指针不会切片，仍指向完整对象
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“C++ 对象切片是什么？”，底层可以从下面几层理解：
+- 继承相关题要分清“接口复用”和“对象布局”。基类子对象真实存在于派生对象内部，按值拷贝到基类对象时会发生切片。
+- 空类通常也要占至少 1 字节，因为两个不同对象需要有不同地址；空基类优化则利用基类子对象规则减少无状态类型开销。
+- 虚继承把共享基类提升为一份虚基类子对象，解决菱形继承的重复基类问题，但会增加访问间接性和对象布局复杂度。
+- 这类题不要死背大小，标准没有规定具体布局；面试回答应把标准语义和主流 ABI 实现分开讲。
 
 ### 面试回答版
 
@@ -7253,12 +7641,14 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：为什么构造函数不能是虚函数？
 struct Base {
     virtual ~Base() = default;
-    virtual void run() { std::cout << "base\n"; }
+    virtual void run() { std::cout << "Base\n"; }
 };
+
 struct Derived : Base {
-    void run() override { std::cout << "derived\n"; }
+    void run() override { std::cout << "Derived\n"; }
 };
 
 std::unique_ptr<Base> p = std::make_unique<Derived>();
@@ -7267,7 +7657,10 @@ p->run(); // 运行期派发到 Derived::run
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“为什么构造函数不能是虚函数？”，底层可以从下面几层理解：
+- 标准只规定动态派发语义，不规定对象里一定有虚表指针；虚表是主流 ABI 的实现方式。
+- 常见实现中，对象保存 vptr，vptr 指向该动态类型的 vtable，调用虚函数时通过表项间接跳转。
+- 构造/析构期间动态类型被限制在当前层级，因此虚函数不会派发到尚未构造或已经析构的派生类部分。
 
 ### 面试回答版
 
@@ -7319,21 +7712,24 @@ p->run(); // 运行期派发到 Derived::run
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：析构函数能不能抛异常？
+struct Bad {
+    ~Bad() noexcept(false) {
+        throw std::runtime_error("fail");
+    }
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 如果栈展开期间析构再抛异常，程序通常会 std::terminate。
+// 工程里析构函数应吞掉/记录错误，提供 close() 返回显式错误。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“析构函数能不能抛异常？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -7385,21 +7781,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：成员初始化列表和构造函数体赋值有什么区别？
+struct S {
+    int a;
+    int b;
+    S() : b(2), a(b + 1) {} // 实际先初始化 a，再初始化 b；这里 a 读到未初始化 b
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 初始化顺序由成员声明顺序决定，不由初始化列表书写顺序决定。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“成员初始化列表和构造函数体赋值有什么区别？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -7451,21 +7849,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：成员初始化顺序由什么决定？
+struct Member {
+    explicit Member(const char* name) { std::cout << name << "\n"; }
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+struct Obj {
+    Member first;
+    Member second;
+    Obj() : second("second"), first("first") {}
+    // 实际先构造 first，再构造 second，因为按声明顺序
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“成员初始化顺序由什么决定？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -7517,25 +7919,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-struct T {
-    T()  { /* 构造对象状态 */ }
-    ~T() { /* 释放对象内部资源 */ }
+// 针对：= default 和 = delete 有什么用？
+struct NonCopyable {
+    NonCopyable() = default;
+    NonCopyable(const NonCopyable&) = delete;
+    NonCopyable& operator=(const NonCopyable&) = delete;
 };
 
-T* a = new T();      // 分配内存 + 调用构造
-delete a;           // 调用析构 + 释放内存
-
-void* raw = std::malloc(sizeof(T)); // 只拿到原始内存
-T* b = new (raw) T();               // placement new 手动构造
-b->~T();                            // 手动析构
-std::free(raw);                     // 释放原始内存
+// default 表达“要编译器生成默认语义”；delete 表达“这个操作不允许”。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
-
-`malloc` 底层通常不是每次都直接向操作系统要内存。常见分配器会维护不同大小的空闲块，小对象从用户态堆缓存里切块；大块内存可能通过 `mmap`；堆不够时再用 `brk/sbrk` 或 `mmap` 扩展。`new` 通常会先调用 `operator new` 拿原始内存，再调用构造函数。
+围绕“= default 和 = delete 有什么用？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -7587,21 +7987,29 @@ std::free(raw);                     // 释放原始内存
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：Rule of Three/Five/Zero 怎么理解？
+class Buffer {
+public:
+    Buffer(size_t n) : p_(new char[n]), n_(n) {}
+    ~Buffer() { delete[] p_; }
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+    Buffer(Buffer&& other) noexcept : p_(other.p_), n_(other.n_) {
+        other.p_ = nullptr;
+        other.n_ = 0;
+    }
+private:
+    char* p_;
+    size_t n_;
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“Rule of Three/Five/Zero 怎么理解？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -7653,21 +8061,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：拷贝省略 RVO/NRVO 是什么？
+class Vec {
+public:
+    Vec(Vec&&) noexcept = default; // 容器扩容时更愿意移动
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+T make() {
+    T obj;
+    return obj; // 可能触发 NRVO/拷贝省略
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“拷贝省略 RVO/NRVO 是什么？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -7719,19 +8131,28 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
-}
+// 针对：noexcept 对移动构造为什么重要？
+class Buffer {
+public:
+    Buffer(size_t n) : p_(new char[n]), n_(n) {}
+    ~Buffer() { delete[] p_; }
 
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
+    Buffer(Buffer&& other) noexcept : p_(other.p_), n_(other.n_) {
+        other.p_ = nullptr;
+        other.n_ = 0;
+    }
+private:
+    char* p_;
+    size_t n_;
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“noexcept 对移动构造为什么重要？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -7783,21 +8204,27 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：mutable 有哪些合理场景？
+class Config {
+public:
+    int hash() const {
+        if (!cached_) { cached_hash_ = compute(); cached_ = true; }
+        return cached_hash_;
+    }
+private:
+    int compute() const;
+    mutable bool cached_ = false;
+    mutable int cached_hash_ = 0;
 };
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“mutable 有哪些合理场景？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -7849,17 +8276,27 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：const 成员函数里的 this 类型是什么？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“const 成员函数里的 this 类型是什么？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -7911,22 +8348,21 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：decltype(auto) 有什么用？
+int x = 1;
+int& ref() { return x; }
+
+auto a = ref();           // a 是 int，引用被丢掉
+decltype(auto) b = ref(); // b 是 int&，保留表达式类型和值类别
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“decltype(auto) 有什么用？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -7978,21 +8414,21 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：auto 推导常见坑？
+int x = 1;
+int& ref() { return x; }
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+auto a = ref();           // a 是 int，引用被丢掉
+decltype(auto) b = ref(); // b 是 int&，保留表达式类型和值类别
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“auto 推导常见坑？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8044,21 +8480,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：std::initializer_list 有什么坑？
+std::deque<int> q;
+q.push_front(1);
+q.push_back(2);     // 适合两端操作
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::list<int> lst{1, 2, 3};
+auto it = std::next(lst.begin());
+lst.insert(it, 9);  // 通常不影响其他节点迭代器
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::initializer_list 有什么坑？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8110,21 +8548,24 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：C++ 名字查找和 ADL 是什么？
+namespace net {
+struct Endpoint {};
+void connect(Endpoint) {}
+}
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+void f(net::Endpoint ep) {
+    connect(ep); // ADL 会把实参所属命名空间 net 里的 connect 加入候选
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“C++ 名字查找和 ADL 是什么？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8176,21 +8617,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：ODR 是什么？
+// header.h
+inline int global_counter = 0; // C++17 inline variable：允许多翻译单元包含同一定义
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 如果在头文件写普通 int global_counter = 0;
+// 多个 .cpp include 后通常会链接期重复定义。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“ODR 是什么？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8242,21 +8683,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：extern "C" 为什么能解决链接问题？
+// a.h
+extern int g_count;       // 声明，不分配存储
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// a.cpp
+int g_count = 0;          // 唯一定义
+
+extern "C" int c_api(int); // 按 C ABI 暴露符号，避免 C++ 名字改编
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“extern "C" 为什么能解决链接问题？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8308,21 +8751,28 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：PIMPL 模式有什么用？
+// widget.h
+class Widget {
+public:
+    Widget();
+    ~Widget();
+    void draw();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> p_;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 头文件不暴露成员细节，减少编译依赖并稳定 ABI 边界。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“PIMPL 模式有什么用？”，底层可以从下面几层理解：
+- 这些题常考编译期规则：类型推导、名字查找、链接规则和翻译单元边界，真正出错时往往表现为重载选错、链接失败或 ABI 不稳定。
+- `auto` 会丢掉顶层 const 和引用，`decltype(auto)` 更忠实保留表达式类型和值类别，因此返回引用包装函数时差异很大。
+- ODR 要求同一实体在程序中定义一致；头文件里随意放非 inline 定义，很容易在多个翻译单元产生重复定义。
+- PIMPL 把实现细节移到 cpp，减少头文件依赖和重编译范围，但代价是一次间接访问和动态分配/特殊成员函数管理成本。
 
 ### 面试回答版
 
@@ -8374,17 +8824,27 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：深 const 和浅 const 怎么理解？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“深 const 和浅 const 怎么理解？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -8436,21 +8896,19 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 针对：std::launder 是什么？
+alignas(T) unsigned char storage[sizeof(T)];
+T* p = new (storage) T(/* args */); // 在已有内存上构造
+p->~T();                            // 手动析构
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::launder 是什么？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`std::launder 是什么？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -8502,21 +8960,19 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+// 针对：union 在现代 C++ 里怎么用？
+alignas(T) unsigned char storage[sizeof(T)];
+T* p = new (storage) T(/* args */); // 在已有内存上构造
+p->~T();                            // 手动析构
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“union 在现代 C++ 里怎么用？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`union 在现代 C++ 里怎么用？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -8568,21 +9024,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：lambda 捕获值和捕获引用区别？
+int base = 10;
+auto by_value = [base](int x) { return base + x; };
+auto by_ref = [&base](int x) { base += x; return base; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::function<int(int)> fn = by_value; // 类型擦除，可保存捕获 lambda
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“lambda 捕获值和捕获引用区别？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -8634,21 +9090,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：lambda 中 mutable 是什么？
+int base = 10;
+auto by_value = [base](int x) { return base + x; };
+auto by_ref = [&base](int x) { base += x; return base; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::function<int(int)> fn = by_value; // 类型擦除，可保存捕获 lambda
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“lambda 中 mutable 是什么？”，底层可以从下面几层理解：
+- `explicit`、`friend`、`mutable` 这类关键字都不是装饰语，而是在改变类型系统、访问控制或 const 语义的边界。
+- `const` 成员函数里的 `this` 近似是指向 const 对象的指针，因此不能改普通成员；`mutable` 是为缓存、统计、锁这类逻辑 const 场景留的出口。
+- `friend` 不会继承、不会传递，本质是给特定函数或类型开访问口；是否破坏封装取决于它是不是表达了一个真实的紧密协作关系。
+- `enum class` 通过作用域和禁止隐式整型转换减少命名污染和误用，是现代 C++ 更推荐的枚举写法。
 
 ### 面试回答版
 
@@ -8700,21 +9156,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：泛型 lambda 是什么？
+int base = 10;
+auto by_value = [base](int x) { return base + x; };
+auto by_ref = [&base](int x) { base += x; return base; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::function<int(int)> fn = by_value; // 类型擦除，可保存捕获 lambda
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“泛型 lambda 是什么？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -8766,21 +9222,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：std::function 和函数指针区别？
+int base = 10;
+auto by_value = [base](int x) { return base + x; };
+auto by_ref = [&base](int x) { base += x; return base; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::function<int(int)> fn = by_value; // 类型擦除，可保存捕获 lambda
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::function 和函数指针区别？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -8832,21 +9288,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
+// 针对：std::bind 和 lambda 怎么选？
+int base = 10;
+auto by_value = [base](int x) { return base + x; };
+auto by_ref = [&base](int x) { base += x; return base; };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+std::function<int(int)> fn = by_value; // 类型擦除，可保存捕获 lambda
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::bind 和 lambda 怎么选？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -8898,21 +9354,23 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：std::optional 适合什么场景？
+std::optional<int> parse(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    return static_cast<int>(s.size());
 }
+
+constexpr int square(int x) { return x * x; }
+static_assert(square(4) == 16);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::optional 适合什么场景？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -8964,12 +9422,14 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：std::variant 和继承多态怎么选？
 struct Base {
     virtual ~Base() = default;
-    virtual void run() { std::cout << "base\n"; }
+    virtual void run() { std::cout << "Base\n"; }
 };
+
 struct Derived : Base {
-    void run() override { std::cout << "derived\n"; }
+    void run() override { std::cout << "Derived\n"; }
 };
 
 std::unique_ptr<Base> p = std::make_unique<Derived>();
@@ -8978,7 +9438,10 @@ p->run(); // 运行期派发到 Derived::run
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::variant 和继承多态怎么选？”，底层可以从下面几层理解：
+- 标准只规定动态派发语义，不规定对象里一定有虚表指针；虚表是主流 ABI 的实现方式。
+- 常见实现中，对象保存 vptr，vptr 指向该动态类型的 vtable，调用虚函数时通过表项间接跳转。
+- 构造/析构期间动态类型被限制在当前层级，因此虚函数不会派发到尚未构造或已经析构的派生类部分。
 
 ### 面试回答版
 
@@ -9030,21 +9493,23 @@ p->run(); // 运行期派发到 Derived::run
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：std::any 适合什么场景？
+std::optional<int> parse(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    return static_cast<int>(s.size());
 }
+
+constexpr int square(int x) { return x * x; }
+static_assert(square(4) == 16);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::any 适合什么场景？”，底层可以从下面几层理解：
+- 现代库设施要讲清“类型信息放在哪里”。lambda 闭包类型在编译期确定；`std::function` 做类型擦除，可能产生间接调用和小对象优化/堆分配。
+- `optional` 表达可能没有值，适合替代部分哨兵值；`variant` 是封闭类型集合，访问时必须处理当前替代项；`any` 是开放动态类型容器。
+- 类型擦除和运行时分发提高灵活性，但会牺牲可见的静态约束、内联机会和一部分调试直观性。
+- 面试时要给出选择标准：核心热路径优先静态类型，边界层/插件/配置可以接受更动态的表达。
 
 ### 面试回答版
 
@@ -9096,17 +9561,27 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：constexpr 函数一定在编译期执行吗？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“constexpr 函数一定在编译期执行吗？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9158,17 +9633,27 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-void print(const std::vector<int>& v) {
-    // v.push_back(1); // 不允许：承诺不修改 v
-    for (int x : v) std::cout << x << ' ';
-}
+// 针对：constinit 解决什么问题？
+struct Cache {
+    int value() const {
+        ++hit_count_;       // mutable 成员可在 const 函数里改
+        return data_;
+    }
+    int data_ = 42;
+    mutable int hit_count_ = 0;
+};
 
-std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
+const int* p1;  // 不能通过 p1 改 int
+int* const p2 = nullptr; // 指针本身不可改
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“constinit 解决什么问题？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9220,21 +9705,25 @@ std::shared_ptr<const std::string> p; // 不能通过 p 修改 string
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：SFINAE 是什么？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“SFINAE 是什么？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9286,21 +9775,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：Concepts 比 SFINAE 好在哪里？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“Concepts 比 SFINAE 好在哪里？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9352,21 +9845,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：CRTP 是什么？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“CRTP 是什么？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9418,21 +9915,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：类型萃取 type_traits 有什么用？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“类型萃取 type_traits 有什么用？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9484,21 +9985,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：std::enable_if 常用于什么？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::enable_if 常用于什么？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9550,21 +10055,26 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：模板特化和重载有什么区别？
+struct Base {
+    virtual void f(int) {}
+    void g(double) {}
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
-}
+struct Derived : Base {
+    using Base::g;        // 把基类重载集合引入当前作用域
+    void f(int) override {}
+    void g(int) {}
+};
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“模板特化和重载有什么区别？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9616,21 +10126,25 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
+// 针对：可变参数模板怎么理解？
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
 };
 
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“可变参数模板怎么理解？”，底层可以从下面几层理解：
+- 模板和编译期题的底层是实例化：编译器根据实参生成或选择具体代码，错误也常在实例化点才暴露。
+- SFINAE 是“替换失败不算错误”，常用于把不满足条件的重载移出候选集；Concepts 把约束写成更直接、更可诊断的接口契约。
+- CRTP 用派生类类型作为模板参数传回基类，获得静态多态；没有虚调用开销，但要求继承结构在编译期确定。
+- `constexpr` 表示可用于常量求值，不保证每次都在编译期执行；`constinit` 关注静态初始化阶段，防止动态初始化顺序问题。
 
 ### 面试回答版
 
@@ -9682,19 +10196,21 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
+// 针对：完美转发为什么需要引用折叠？
+template <class T, class... Args>
+std::unique_ptr<T> make_obj(Args&&... args) {
+    return std::unique_ptr<T>(
+        new T(std::forward<Args>(args)...)
+    );
 }
-
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“完美转发为什么需要引用折叠？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -9746,19 +10262,24 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
-}
+// 针对：std::move_if_noexcept 是什么？
+std::string a = "hello";
+std::string b = a;             // 拷贝，a 仍保持原内容
+std::string c = std::move(a);  // 允许移动 a 的内部资源
 
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
+void f(std::string&& s) {
+    use(s);             // s 有名字，所以表达式 s 是左值
+    use(std::move(s));  // 这里才按右值传出
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::move_if_noexcept 是什么？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -9810,21 +10331,23 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-// C++ 题先用一个最小例子验证生命周期
-struct Guard {
-    Guard()  { std::cout << "acquire\n"; }
-    ~Guard() { std::cout << "release\n"; }
-};
-
-void f() {
-    Guard g;
-    // return 或异常离开作用域时都会析构 g
+// 针对：std::span 是什么？
+std::optional<int> parse(std::string_view s) {
+    if (s.empty()) return std::nullopt;
+    return static_cast<int>(s.size());
 }
+
+constexpr int square(int x) { return x * x; }
+static_assert(square(4) == 16);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，C++ 题通常会落到对象模型、ABI、编译器生成的特殊成员函数、栈展开、动态分配器和标准库实现。面试中不要把这些实现细节说成标准强制，但要知道常见实现为什么会这样做。
+围绕“std::span 是什么？”，底层可以从下面几层理解：
+- 这题属于 C++ 语义题，学习时要先问：`std::span 是什么？` 改变的是类型系统、对象生命周期、重载解析，还是链接/编译边界。
+- 再往下一层看编译器如何利用这些规则生成代码，例如是否能内联、是否需要运行期表、是否会触发隐式构造或临时对象。
+- 最后要补标准与实现的边界：C++ 标准规定语义和可观察行为，虚表布局、SSO 大小、对象具体 padding 往往是实现细节。
+- 面试回答最好配一个会编译失败或行为变化的小例子，比只背定义更容易抗追问。
 
 ### 面试回答版
 
@@ -9876,15 +10399,22 @@ void f() {
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：array 和普通数组区别？
+std::array<int, 3> a{1, 2, 3};
+int raw[3] = {1, 2, 3};
+
+static_assert(a.size() == 3);
+auto copy = a;        // std::array 可整体拷贝
+// auto copy2 = raw;  // 原生数组在多数表达式中会退化为指针
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“array 和普通数组区别？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -9936,19 +10466,21 @@ v.push_back(4); // 如果触发扩容，it 失效
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
+// 针对：forward_list 有什么特点？
+template <class T, class... Args>
+std::unique_ptr<T> make_obj(Args&&... args) {
+    return std::unique_ptr<T>(
+        new T(std::forward<Args>(args)...)
+    );
 }
-
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“forward_list 有什么特点？”，底层可以从下面几层理解：
+- 移动语义不是移动表达式本身，而是让重载解析选择移动构造/移动赋值，从而接管内部资源。
+- 具名右值引用表达式仍是左值，所以转发函数内部必须用 `std::forward<T>` 恢复调用者传入时的值类别。
+- 移动后对象仍必须可析构、可赋值，但具体值通常只保证有效不保证原内容。
 
 ### 面试回答版
 
@@ -9999,15 +10531,24 @@ wrapper(std::move(s));   // 按右值转发
 
 ### 代码/伪代码示例
 
-```text
-正常路径：写缓存/发消息
-失败路径：重试、幂等、超时、补偿、告警
-面试回答要同时覆盖这两条路径。
+```cpp
+// 针对：deque 为什么适合队列？
+std::deque<int> q;
+q.push_front(1);
+q.push_back(2);     // 适合两端操作
+
+std::list<int> lst{1, 2, 3};
+auto it = std::next(lst.begin());
+lst.insert(it, 9);  // 通常不影响其他节点迭代器
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Redis/MQ 题核心是内存结构、事件循环、持久化、复制、确认机制和失败恢复。高性能组件常把复杂性转移到一致性和故障处理上。
+围绕“deque 为什么适合队列？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -10059,15 +10600,21 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：priority_queue 怎么自定义比较？
+struct Job { int deadline; int id; };
+auto cmp = [](const Job& a, const Job& b) {
+    return a.deadline > b.deadline; // 小 deadline 优先
+};
+std::priority_queue<Job, std::vector<Job>, decltype(cmp)> pq(cmp);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“priority_queue 怎么自定义比较？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -10119,16 +10666,29 @@ unordered_map 像按哈希分柜子。平均查找快，但柜子分布不好或
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：unordered_map 的 rehash 什么时候发生？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“unordered_map 的 rehash 什么时候发生？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -10180,16 +10740,20 @@ unordered_map 像按哈希分柜子。平均查找快，但柜子分布不好或
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：reserve 和 rehash 在 unordered_map 中区别？
 std::vector<int> v;
-v.reserve(100);          // 只改容量，不改 size
-auto old = v.data();
-for (int i = 0; i < 100; ++i) v.push_back(i);
-// 如果没有再次扩容，old 仍可能等于 v.data()
+v.reserve(100);     // 只预留容量，不构造元素
+auto* old = v.data();
+v.push_back(1);     // 如果触发扩容，old 会失效
+v.resize(10);       // 改变 size，可能构造新元素
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“reserve 和 rehash 在 unordered_map 中区别？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -10241,16 +10805,29 @@ map 像有序目录，查找不是最快的平均 O(1)，但顺序稳定，范�
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：map 插入时迭代器会失效吗？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“map 插入时迭代器会失效吗？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -10302,18 +10879,20 @@ vector 像一排连续座位。座位不够时要整体搬家，所以旧座位�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：vector<bool> 有什么特殊？
 std::vector<int> v;
-v.reserve(100);          // 只改容量，不改 size
-auto old = v.data();
-for (int i = 0; i < 100; ++i) v.push_back(i);
-// 如果没有再次扩容，old 仍可能等于 v.data()
+v.reserve(100);     // 只预留容量，不构造元素
+auto* old = v.data();
+v.push_back(1);     // 如果触发扩容，old 会失效
+v.resize(10);       // 改变 size，可能构造新元素
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
-
-`vector` 的连续内存让 CPU 预取和缓存命中更好。扩容时需要分配新内存并移动/拷贝元素，所以旧地址失效。增长倍数是库实现策略，不是标准规定。
+围绕“vector<bool> 有什么特殊？”，底层可以从下面几层理解：
+- `vector` 的核心优势是连续内存，CPU 缓存和预取友好，随机访问只需要基址加偏移。
+- 扩容时需要申请新连续空间，再移动或拷贝旧元素，因此旧指针、引用、迭代器会指向旧内存。
+- 增长倍数、SSO 阈值这类属于标准库实现策略，面试中要区分标准复杂度要求和实现细节。
 
 ### 面试回答版
 
@@ -10369,19 +10948,23 @@ v.erase(std::remove(v.begin(), v.end(), x), v.end());
 ### 代码/伪代码示例
 
 ```cpp
-template <class T>
-void wrapper(T&& x) {
-    target(std::forward<T>(x)); // 保留调用者传入时的左值/右值属性
-}
+// 针对：erase-remove 惯用法是什么？
+std::vector<int> v{1, 2, 3, 2, 4};
+v.erase(std::remove(v.begin(), v.end(), 2), v.end());
 
-std::string s = "abc";
-wrapper(s);              // 按左值转发
-wrapper(std::move(s));   // 按右值转发
+for (auto it = v.begin(); it != v.end(); ) {
+    if (*it % 2 == 0) it = v.erase(it);
+    else ++it;
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“erase-remove 惯用法是什么？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -10433,15 +11016,23 @@ wrapper(std::move(s));   // 按右值转发
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：std::list::splice 有什么用？
+std::deque<int> q;
+q.push_front(1);
+q.push_back(2);     // 适合两端操作
+
+std::list<int> lst{1, 2, 3};
+auto it = std::next(lst.begin());
+lst.insert(it, 9);  // 通常不影响其他节点迭代器
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“std::list::splice 有什么用？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -10493,16 +11084,29 @@ unordered_map 像按哈希分柜子。平均查找快，但柜子分布不好或
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：自定义类型放入 unordered_map 需要什么？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“自定义类型放入 unordered_map 需要什么？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -10554,16 +11158,29 @@ map 像有序目录，查找不是最快的平均 O(1)，但顺序稳定，范�
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：自定义类型作为 map key 需要什么？
+struct Key { int a; int b; };
+struct KeyHash {
+    size_t operator()(const Key& k) const {
+        return std::hash<int>{}(k.a) ^ (std::hash<int>{}(k.b) << 1);
+    }
+};
+struct KeyEq {
+    bool operator()(const Key& x, const Key& y) const {
+        return x.a == y.a && x.b == y.b;
+    }
+};
+
+std::unordered_map<Key, int, KeyHash, KeyEq> table;
+table.reserve(1024); // 已知规模时减少 rehash
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“自定义类型作为 map key 需要什么？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -10615,15 +11232,20 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：allocator 是什么？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“allocator 是什么？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -10675,16 +11297,26 @@ v.push_back(4); // 如果触发扩容，it 失效
 ### 代码/伪代码示例
 
 ```cpp
-auto p = std::make_unique<std::string>("cpp");
-auto q = std::move(p);   // 所有权转移
-if (!p) {
-    // p 不再拥有对象
-}
+// 针对：unique_ptr 可以放进容器吗？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
+};
+
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“unique_ptr 可以放进容器吗？”，底层可以从下面几层理解：
+- 这题属于 STL 使用题，底层要落到 `unique_ptr 可以放进容器吗？` 对应的数据结构、内存布局、复杂度和迭代器/引用稳定性。
+- 标准库通常只承诺复杂度和语义，不承诺具体增长倍数、桶实现或小对象优化阈值，回答时要避免把某个实现当标准。
+- 容器选择不是只看 Big-O，还要看缓存局部性、元素移动成本、异常安全和是否需要稳定地址。
+- 工程里遇到性能问题，应先用数据确认热点，再考虑 reserve、pmr、自定义哈希或更换容器。
 
 ### 面试回答版
 
@@ -10736,24 +11368,25 @@ if (!p) {
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：shared_ptr 自定义删除器有什么用？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
-
-`shared_ptr` 的关键不是指针本身，而是控制块。控制块里的强引用计数决定对象何时析构，弱引用计数决定控制块何时释放。计数增减通常要用原子操作，所以 shared_ptr 有一定并发和性能成本。
+围绕“shared_ptr 自定义删除器有什么用？”，底层可以从下面几层理解：
+- `shared_ptr` 的关键是控制块，里面通常有强引用计数、弱引用计数、删除器和分配器信息。
+- 强计数归零时析构对象；弱计数也归零时控制块才释放。`weak_ptr` 能观察控制块，但不增加强计数。
+- `make_shared` 常把对象和控制块一次分配，减少分配次数；代价是弱引用存在时整块内存可能延后释放。
 
 ### 面试回答版
 
@@ -10805,24 +11438,25 @@ p->child->parent = p;
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：weak_ptr::lock() 为什么返回 shared_ptr？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
-
-`shared_ptr` 的关键不是指针本身，而是控制块。控制块里的强引用计数决定对象何时析构，弱引用计数决定控制块何时释放。计数增减通常要用原子操作，所以 shared_ptr 有一定并发和性能成本。
+围绕“weak_ptr::lock() 为什么返回 shared_ptr？”，底层可以从下面几层理解：
+- `shared_ptr` 的关键是控制块，里面通常有强引用计数、弱引用计数、删除器和分配器信息。
+- 强计数归零时析构对象；弱计数也归零时控制块才释放。`weak_ptr` 能观察控制块，但不增加强计数。
+- `make_shared` 常把对象和控制块一次分配，减少分配次数；代价是弱引用存在时整块内存可能延后释放。
 
 ### 面试回答版
 
@@ -10874,15 +11508,26 @@ p->child->parent = p;
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：enable_shared_from_this 解决什么？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
+};
+
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“enable_shared_from_this 解决什么？”，底层可以从下面几层理解：
+- 这题属于 STL 使用题，底层要落到 `enable_shared_from_this 解决什么？` 对应的数据结构、内存布局、复杂度和迭代器/引用稳定性。
+- 标准库通常只承诺复杂度和语义，不承诺具体增长倍数、桶实现或小对象优化阈值，回答时要避免把某个实现当标准。
+- 容器选择不是只看 Big-O，还要看缓存局部性、元素移动成本、异常安全和是否需要稳定地址。
+- 工程里遇到性能问题，应先用数据确认热点，再考虑 reserve、pmr、自定义哈希或更换容器。
 
 ### 面试回答版
 
@@ -10934,22 +11579,26 @@ v.push_back(4); // 如果触发扩容，it 失效
 ### 代码/伪代码示例
 
 ```cpp
-struct Parent;
-struct Child {
-    std::weak_ptr<Parent> parent; // 观察，不拥有
-};
-struct Parent {
-    std::shared_ptr<Child> child; // 拥有
+// 针对：智能指针能管理数组吗？
+struct Node {
+    std::string name;
+    std::weak_ptr<Node> parent;                // 观察关系
+    std::vector<std::shared_ptr<Node>> child;  // 拥有关系
 };
 
-auto p = std::make_shared<Parent>();
-p->child = std::make_shared<Child>();
-p->child->parent = p;
+auto root = std::make_shared<Node>();
+auto leaf = std::make_shared<Node>();
+leaf->parent = root;       // 不增加强引用，避免循环引用
+root->child.push_back(leaf);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“智能指针能管理数组吗？”，底层可以从下面几层理解：
+- 这题属于 STL 使用题，底层要落到 `智能指针能管理数组吗？` 对应的数据结构、内存布局、复杂度和迭代器/引用稳定性。
+- 标准库通常只承诺复杂度和语义，不承诺具体增长倍数、桶实现或小对象优化阈值，回答时要避免把某个实现当标准。
+- 容器选择不是只看 Big-O，还要看缓存局部性、元素移动成本、异常安全和是否需要稳定地址。
+- 工程里遇到性能问题，应先用数据确认热点，再考虑 reserve、pmr、自定义哈希或更换容器。
 
 ### 面试回答版
 
@@ -11001,15 +11650,20 @@ p->child->parent = p;
 ### 代码/伪代码示例
 
 ```cpp
-// STL 题先验证复杂度和失效规则
-std::vector<int> v{1, 2, 3};
-auto it = v.begin();
-v.push_back(4); // 如果触发扩容，it 失效
+// 针对：std::pmr 是什么？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，STL 容器的表现主要由内存布局决定：连续内存缓存友好但搬家会失效；节点式容器地址稳定但缓存局部性差；哈希表平均快但 rehash 和冲突会带来抖动。
+围绕“std::pmr 是什么？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -11060,14 +11714,21 @@ v.push_back(4); // 如果触发扩容，it 失效
 
 ### 代码/伪代码示例
 
-```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+```cpp
+// 针对：小对象频繁分配怎么优化？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“小对象频繁分配怎么优化？”，底层可以从下面几层理解：
+- 容器题要从内存布局、迭代器稳定性和复杂度三条线讲。连续容器缓存友好但扩容会搬迁元素，节点容器稳定但局部性差。
+- `deque` 通常是分段连续存储，适合两端插入删除；`priority_queue` 是容器适配器，核心不变量是堆顶满足比较规则。
+- `allocator`/`pmr` 关注分配策略，把“对象如何构造”和“内存从哪里来”分开，适合大量小对象或阶段性批量释放场景。
+- `reserve` 管元素容量，`rehash` 管桶数量；对哈希容器来说负载因子和哈希质量会直接影响性能抖动。
 
 ### 面试回答版
 
@@ -11119,22 +11780,23 @@ v.push_back(4); // 如果触发扩容，it 失效
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：std::thread 析构前为什么要 join 或 detach？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“std::thread 析构前为什么要 join 或 detach？”，底层可以从下面几层理解：
+- 对象生命周期不是“分配一块内存”这么简单，而是原始存储、构造完成、可用、析构、释放这几段状态。
+- 成员初始化顺序由声明顺序决定；构造函数体赋值已经晚了一步，const 成员、引用成员和无默认构造成员必须在初始化列表中完成。
+- 异常安全要看对象是否已经构造完成：构造过程中已完成的成员会被逆序析构，未完成的对象本身不会调用析构函数。
+- `noexcept` 会影响标准容器搬迁元素时选择移动还是拷贝，进而影响性能和异常安全保证。
 
 ### 面试回答版
 
@@ -11186,18 +11848,23 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：std::jthread 相比 thread 有什么改进？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“std::jthread 相比 thread 有什么改进？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11249,22 +11916,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：join 和 detach 区别？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“join 和 detach 区别？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11316,18 +11984,23 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：std::async 默认一定开新线程吗？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“std::async 默认一定开新线程吗？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11379,18 +12052,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：future 和 promise 怎么配合？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“future 和 promise 怎么配合？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11442,18 +12120,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
-}
+// 针对：packaged_task 是什么？
+std::promise<int> p;
+std::future<int> f = p.get_future();
+std::thread worker([pr = std::move(p)]() mutable {
+    pr.set_value(42);
+});
+std::cout << f.get() << "\n";
+worker.join(); // thread 析构前必须 join 或 detach
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“packaged_task 是什么？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11505,18 +12188,21 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：lock_guard 和 unique_lock 区别？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“lock_guard 和 unique_lock 区别？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11568,18 +12254,21 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：scoped_lock 有什么用？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“scoped_lock 有什么用？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11631,18 +12320,21 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：递归锁 recursive_mutex 为什么少用？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“递归锁 recursive_mutex 为什么少用？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11694,18 +12386,22 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：条件变量通知在解锁前还是解锁后？
 std::unique_lock<std::mutex> lk(mu);
-cv.wait(lk, [&] {
-    return stopped || !queue.empty();
+not_empty.wait(lk, [&] {
+    return closed || !queue.empty();
 });
-if (stopped && queue.empty()) return;
-auto task = std::move(queue.front());
+if (queue.empty() && closed) return false;
+out = std::move(queue.front());
 queue.pop();
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“条件变量通知在解锁前还是解锁后？”，底层可以从下面几层理解：
+- 条件变量底层会把线程挂到等待队列，并在 wait 时原子地释放互斥锁和阻塞当前线程。
+- 被唤醒后线程要重新抢锁；抢到锁后条件也可能已经被其他线程改变，所以必须用 predicate/while。
+- notify 不是发送数据，只是提示状态可能变化；真正的状态必须由受锁保护的共享变量表达。
 
 ### 面试回答版
 
@@ -11757,22 +12453,19 @@ queue.pop();
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：原子变量 fetch_add 返回什么？
+std::atomic<int> x{0};
+int old = x.fetch_add(1, std::memory_order_relaxed);
+// old 是加之前的值；调用后 x 至少在当前原子对象上完成一次不可分割的读-改-写。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“原子变量 fetch_add 返回什么？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11824,18 +12517,28 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
+// 针对：ABA 问题是什么？
+std::atomic<bool> ready{false};
+int data = 0;
 
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+void consumer() {
+    if (ready.load(std::memory_order_acquire)) {
+        assert(data == 42);
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“ABA 问题是什么？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11887,18 +12590,28 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
+// 针对：false sharing 是什么？
+std::atomic<bool> ready{false};
+int data = 0;
 
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+void consumer() {
+    if (ready.load(std::memory_order_acquire)) {
+        assert(data == 42);
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“false sharing 是什么？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -11950,18 +12663,24 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：线程局部存储 thread_local 适合什么？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“线程局部存储 thread_local 适合什么？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12013,18 +12732,24 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：单例的线程安全怎么保证？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“单例的线程安全怎么保证？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12076,18 +12801,21 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：读多写少一定用读写锁吗？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“读多写少一定用读写锁吗？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12139,18 +12867,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：无锁一定比加锁快吗？
+std::atomic<int> x{0};
+int old = x.load(std::memory_order_relaxed);
+while (!x.compare_exchange_weak(old, old + 1,
+                                std::memory_order_release,
+                                std::memory_order_relaxed)) {
+    // 竞争激烈时会反复重试；这就是无锁代码也可能慢的原因之一
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“无锁一定比加锁快吗？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12202,18 +12935,23 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：生产者消费者如何优雅退出？
 std::unique_lock<std::mutex> lk(mu);
-cv.wait(lk, [&] {
-    return stopped || !queue.empty();
+not_empty.wait(lk, [&] {
+    return closed || !queue.empty();
 });
-if (stopped && queue.empty()) return;
-auto task = std::move(queue.front());
+if (queue.empty() && closed) return false;
+out = std::move(queue.front());
 queue.pop();
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“生产者消费者如何优雅退出？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12265,18 +13003,24 @@ queue.pop();
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
-
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+// 针对：多线程日志系统怎么设计？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“多线程日志系统怎么设计？”，底层可以从下面几层理解：
+- 并发题要先判断共享状态在哪里，再判断同步关系怎么建立。锁保护临界区，条件变量表达状态变化，atomic 负责单个对象的原子访问和内存序约束。
+- `thread` 析构前必须 join/detach 是为了避免线程所有权悬空；`jthread` 把自动 join 和协作取消纳入生命周期管理。
+- false sharing 是缓存行粒度的问题，不是 C++ 对象层面的数据竞争；不同线程写不同变量也可能因为同一 cache line 互相拖慢。
+- 无锁不等于更快，它把互斥等待换成 CAS 重试、内存回收和 ABA 等问题；工程里要用数据和场景证明收益。
 
 ### 面试回答版
 
@@ -12328,18 +13072,28 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-std::mutex mu;
-int shared = 0;
+// 针对：C++ 内存模型中的 happens-before 怎么理解？
+std::atomic<bool> ready{false};
+int data = 0;
 
-void add() {
-    std::lock_guard<std::mutex> lk(mu);
-    ++shared; // 共享状态必须受保护
+void producer() {
+    data = 42;
+    ready.store(true, std::memory_order_release);
+}
+void consumer() {
+    if (ready.load(std::memory_order_acquire)) {
+        assert(data == 42);
+    }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，并发问题最终会落到 CPU 缓存一致性、内存可见性、阻塞/唤醒、调度和锁竞争。代码写对优先于追求无锁，除非你能验证性能瓶颈。
+围绕“C++ 内存模型中的 happens-before 怎么理解？”，底层可以从下面几层理解：
+- 这题属于并发题，围绕 `C++ 内存模型中的 happens-before 怎么理解？` 要先找共享状态，再说明谁负责同步、谁负责通知、谁负责退出和资源回收。
+- 锁解决互斥，条件变量解决等待状态变化，atomic 解决单对象原子访问；三者不是互相完全替代的关系。
+- 底层追问通常会落到调度、阻塞唤醒、缓存一致性、内存序和异常退出路径。
+- 工程答案要主动补：是否会死锁、是否会丢任务、是否有队列上限、关闭时怎样唤醒所有等待线程。
 
 ### 面试回答版
 
@@ -12391,16 +13145,24 @@ void add() {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：进程间通信方式有哪些？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“进程间通信方式有哪些？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12452,22 +13214,19 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：管道和 socket 区别？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“管道和 socket 区别？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12519,16 +13278,24 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：僵尸进程是什么？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“僵尸进程是什么？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12580,16 +13347,24 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：孤儿进程是什么？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“孤儿进程是什么？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12641,16 +13416,24 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：守护进程怎么创建？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“守护进程怎么创建？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12702,16 +13485,19 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：页面置换算法有哪些？
+int stack_value = 1;
+auto heap_value = std::make_unique<int>(2);
+// 第一次访问某些虚拟页时，可能触发缺页，由内核建立映射
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“页面置换算法有哪些？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12763,16 +13549,18 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：缺页异常一定是错误吗？
+int stack_value = 1;
+auto heap_value = std::make_unique<int>(2);
+// 第一次访问某些虚拟页时，可能触发缺页，由内核建立映射
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“缺页异常一定是错误吗？”，底层可以从下面几层理解：
+- 进程看到的是虚拟地址，CPU 通过页表和 TLB 转换到物理地址。
+- fork 通常复制页表而不是立即复制全部物理页，父子进程写共享页时触发写时复制。
+- `mmap` 把文件或匿名内存映射到虚拟地址空间，第一次访问可能缺页，由内核加载或分配页面。
 
 ### 面试回答版
 
@@ -12824,16 +13612,21 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：文件描述符和打开文件描述有什么区别？
+int pipefd[2];
+pipe(pipefd);
+write(pipefd[1], "x", 1);
+char c;
+read(pipefd[0], &c, 1);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“文件描述符和打开文件描述有什么区别？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12885,16 +13678,21 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+// 针对：dup 和 dup2 有什么用？
+int pipefd[2];
+pipe(pipefd);
+write(pipefd[1], "x", 1);
+char c;
+read(pipefd[0], &c, 1);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“dup 和 dup2 有什么用？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -12946,16 +13744,22 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：零拷贝是什么？
+void* p = mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
+if (p != MAP_FAILED) {
+    auto* bytes = static_cast<const char*>(p);
+    // 像读内存一样访问文件映射
+    munmap(p, len);
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“零拷贝是什么？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13007,16 +13811,22 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：sendfile 适合什么场景？
+void* p = mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
+if (p != MAP_FAILED) {
+    auto* bytes = static_cast<const char*>(p);
+    // 像读内存一样访问文件映射
+    munmap(p, len);
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“sendfile 适合什么场景？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13068,16 +13878,22 @@ if (n == -1) {
 ### 代码/伪代码示例
 
 ```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
+// 针对：select 的 fd 限制来自哪里？
+for (;;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“select 的 fd 限制来自哪里？”，底层可以从下面几层理解：
+- select/poll 每次调用都要把关注集合交给内核，并扫描集合找就绪项。
+- epoll 把关注集合保存在内核，fd 状态变化时把事件放进就绪队列，用户态取活跃事件。
+- LT 是条件满足就持续通知；ET 是状态变化才通知，必须配非阻塞 fd 并处理到 EAGAIN。
 
 ### 面试回答版
 
@@ -13129,24 +13945,22 @@ epoll 像把关注列表交给内核保管，事件来了只把活跃 fd 告诉�
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：epoll 惊群是什么？
 for (;;) {
     ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-`epoll` 把关注的 fd 集合留在内核中，事件到来时把就绪项挂到就绪队列。ET 模式减少重复通知，但要求用户态一次处理到 `EAGAIN`，否则内核不一定再次提醒。
+围绕“epoll 惊群是什么？”，底层可以从下面几层理解：
+- select/poll 每次调用都要把关注集合交给内核，并扫描集合找就绪项。
+- epoll 把关注集合保存在内核，fd 状态变化时把事件放进就绪队列，用户态取活跃事件。
+- LT 是条件满足就持续通知；ET 是状态变化才通知，必须配非阻塞 fd 并处理到 EAGAIN。
 
 ### 面试回答版
 
@@ -13198,22 +14012,23 @@ for (;;) {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：EAGAIN 和 EINTR 怎么处理？
 for (;;) {
     ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
+    if (n > 0) append_input(buf, n);
+    else if (n == -1 && errno == EINTR) continue;
+    else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+    else { close(fd); break; }
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“EAGAIN 和 EINTR 怎么处理？”，底层可以从下面几层理解：
+- 这题属于系统题，回答 `EAGAIN 和 EINTR 怎么处理？` 时要分清用户态抽象、内核对象和硬件机制三层。
+- 用户看到的是进程、线程、fd、地址；内核维护的是 task、file、inode/socket、页表、调度队列和缓存。
+- 性能和故障排查不能只讲原因，要讲可验证工具：strace 看系统调用，perf 看 CPU 热点，pmap/smaps 看内存映射，gdb/core 看崩溃。
+- 面试官继续追问时，通常会要求你把现象落到资源限制、阻塞点、内核队列或生命周期泄漏上。
 
 ### 面试回答版
 
@@ -13264,18 +14079,21 @@ for (;;) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```bash
+# 针对：大量连接处于 CLOSE_WAIT 说明什么？
+ss -tan state close-wait
+lsof -p <pid> -a -iTCP
+strace -f -p <pid> -e close,shutdown,read,write
+# CLOSE_WAIT 多：通常是对端已关，本进程没有及时 close。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“大量连接处于 CLOSE_WAIT 说明什么？”，底层可以从下面几层理解：
+- 这题属于网络题，围绕 `大量连接处于 CLOSE_WAIT 说明什么？` 要区分传输层保证、应用层协议和服务端工程处理。
+- TCP 负责可靠有序字节流，但消息边界、超时策略、鉴权、重试和幂等通常要由应用层协议或业务逻辑处理。
+- 底层常见资源包括 socket 缓冲区、半连接队列、accept 队列、epoll 就绪队列和用户态读写缓冲。
+- 工程答案要补失败路径：超时、半包、断连、慢客户端、写缓冲堆积、下游阻塞和优雅关闭。
 
 ### 面试回答版
 
@@ -13326,17 +14144,21 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+```bash
+# 针对：CPU 占用高怎么排查？
+top -H -p <pid>
+pidstat -wt -p <pid> 1
+pmap -x <pid> | tail
+gdb ./app core
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“CPU 占用高怎么排查？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13387,17 +14209,21 @@ if (n == -1) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+```bash
+# 针对：内存占用高怎么排查？
+top -H -p <pid>
+pidstat -wt -p <pid> 1
+pmap -x <pid> | tail
+gdb ./app core
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“内存占用高怎么排查？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13448,17 +14274,21 @@ if (n == -1) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+```bash
+# 针对：上下文切换高说明什么？
+top -H -p <pid>
+pidstat -wt -p <pid> 1
+pmap -x <pid> | tail
+gdb ./app core
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“上下文切换高说明什么？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13509,17 +14339,21 @@ if (n == -1) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+```bash
+# 针对：负载 load average 高一定是 CPU 高吗？
+top -H -p <pid>
+pidstat -wt -p <pid> 1
+pmap -x <pid> | tail
+gdb ./app core
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“负载 load average 高一定是 CPU 高吗？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13570,17 +14404,21 @@ if (n == -1) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 系统调用通常要检查返回值和 errno
-ssize_t n = read(fd, buf, sizeof(buf));
-if (n == -1) {
-    perror("read");
-}
+```bash
+# 针对：core dump 怎么用？
+top -H -p <pid>
+pidstat -wt -p <pid> 1
+pmap -x <pid> | tail
+gdb ./app core
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，Linux 把很多东西都抽象成文件描述符、虚拟内存区域和内核对象。理解 fd 表、页表、调度和系统调用边界，很多现象就能解释清楚。
+围绕“core dump 怎么用？”，底层可以从下面几层理解：
+- Linux/OS 题要把用户态 API 和内核对象分开。进程拿到的是 fd、虚拟地址和返回值，真正的文件对象、页缓存、调度队列在内核里维护。
+- 系统调用会发生用户态/内核态切换，开销来自陷入内核、参数检查、权限检查、调度和可能的阻塞，不只是一次函数调用。
+- 排查题要建立证据链：top 看现象，pidstat/vmstat 看 CPU/IO/上下文切换，strace 看系统调用，perf 看热点，core/gdb 看崩溃现场。
+- 零拷贝的核心是减少用户态和内核态之间的数据搬运，不等于没有任何拷贝；网卡 DMA、页缓存和协议栈仍可能参与。
 
 ### 面试回答版
 
@@ -13631,20 +14469,20 @@ TCP 只保证一条可靠字节流，不知道你的业务消息从哪里开始�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP backlog 是什么？
+三次握手：CLOSED -> SYN_SENT -> ESTABLISHED
+四次挥手：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+排查连接：ss -tan state time-wait
+服务端参数：somaxconn / tcp_max_syn_backlog / ulimit -n
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP backlog 是什么？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -13696,12 +14534,20 @@ TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。�
 ### 代码/伪代码示例
 
 ```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+针对：SYN flood 是什么？
+三次握手：CLOSED -> SYN_SENT -> ESTABLISHED
+四次挥手：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+排查连接：ss -tan state time-wait
+服务端参数：somaxconn / tcp_max_syn_backlog / ulimit -n
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“SYN flood 是什么？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -13752,20 +14598,20 @@ TCP 只保证一条可靠字节流，不知道你的业务消息从哪里开始�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TCP keepalive 和 HTTP keep-alive 区别？
+三次握手：CLOSED -> SYN_SENT -> ESTABLISHED
+四次挥手：FIN_WAIT_1 -> FIN_WAIT_2 -> TIME_WAIT -> CLOSED
+排查连接：ss -tan state time-wait
+服务端参数：somaxconn / tcp_max_syn_backlog / ulimit -n
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP keepalive 和 HTTP keep-alive 区别？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -13816,13 +14662,20 @@ TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。�
 
 ### 代码/伪代码示例
 
-```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+```cpp
+// 针对：心跳包有什么用？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“心跳包有什么用？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -13874,17 +14727,19 @@ TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。�
 ### 代码/伪代码示例
 
 ```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+// 针对：长连接和短连接怎么选？
+int yes = 1;
+setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+// 低延迟小包场景可关闭 Nagle；吞吐型场景要压测再决定
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“长连接和短连接怎么选？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -13935,18 +14790,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：HTTP 状态码 301、302、304、400、401、403、404、500 区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“HTTP 状态码 301、302、304、400、401、403、404、500 区别？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -13997,23 +14853,20 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+```text
+针对：GET 和 POST 区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“GET 和 POST 区别？”，底层可以从下面几层理解：
+- HTTP 方法题要分清协议语义和具体实现。GET 语义上用于获取资源，通常可缓存、可重试；POST 语义上提交处理请求，不天然幂等。
+- GET 参数放 URL、POST body 更常见，但这不是本质区别；真正影响工程行为的是幂等性、缓存、代理、浏览器历史和服务端副作用。
+- HTTP 缓存依赖 Cache-Control、ETag、Last-Modified 等头部协作，304 表示资源未变，可以复用本地缓存体。
+- 面试回答不要说“GET 一定安全、POST 一定安全”。安全和幂等是协议语义，最终还取决于服务端是否按语义实现。
 
 ### 面试回答版
 
@@ -14064,15 +14917,19 @@ for (;;) {
 
 ### 代码/伪代码示例
 
-```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+```text
+针对：幂等的 HTTP 方法有哪些？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“幂等的 HTTP 方法有哪些？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -14123,18 +14980,19 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：HTTP 缓存怎么工作？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“HTTP 缓存怎么工作？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -14185,18 +15043,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：TLS 握手为什么需要非对称加密和对称加密结合？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“TLS 握手为什么需要非对称加密和对称加密结合？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -14247,18 +15106,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：RPC 和 HTTP API 区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“RPC 和 HTTP API 区别？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -14310,12 +15170,19 @@ while (need_write > 0) {
 ### 代码/伪代码示例
 
 ```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+针对：序列化协议怎么选？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“序列化协议怎么选？”，底层可以从下面几层理解：
+- 序列化协议本质是在类型表达能力、可读性、体积、编码速度、跨语言支持和版本演进之间取舍。
+- JSON 可读性强但体积大、类型弱；Protobuf/FlatBuffers 体积和速度更好，但需要 schema 和生成代码。
+- 版本兼容要提前设计字段编号、默认值、可选字段和未知字段处理，否则上线后协议演进会变成强耦合发布。
+- 底层追问常会问大小端、整数变长编码、字符串长度前缀、零拷贝读取以及 schema 变更如何兼容旧客户端。
 
 ### 面试回答版
 
@@ -14366,13 +15233,24 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+```cpp
+// 针对：大包传输要注意什么？
+while (buffer.size() >= 4) {
+    uint32_t len = read_uint32_be(buffer.data());
+    if (len > kMaxFrame) throw ProtocolError();
+    if (buffer.size() < 4 + len) break; // 半包，继续等数据
+    handle_frame(buffer.substr(4, len));
+    buffer.erase(0, 4 + len);
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“大包传输要注意什么？”，底层可以从下面几层理解：
+- 大包传输的问题不只是“能不能发完”，而是内存占用、发送缓冲区堆积、慢客户端、超时和对其他连接的公平性。
+- 应用层应分块读取和分块发送，避免一次性把整个文件读入内存；写 socket 要处理短写和 EAGAIN，把剩余数据留在输出缓冲。
+- 底层会经过页缓存、socket 发送缓冲区、TCP 分段、拥塞窗口和对端接收窗口，任何一层慢都会让上层感受到背压。
+- 工程上要配合限速、超时、断点续传、校验和以及最大包大小限制，防止单个请求拖垮事件循环或内存。
 
 ### 面试回答版
 
@@ -14424,19 +15302,23 @@ while (need_write > 0) {
 ### 代码/伪代码示例
 
 ```cpp
-// 4 字节长度 + body
-if (buffer.size() >= 4) {
+// 针对：半包解析器怎么设计？
+while (buffer.size() >= 4) {
     uint32_t len = read_uint32_be(buffer.data());
-    if (buffer.size() >= 4 + len) {
-        std::string frame = buffer.substr(4, len);
-        buffer.erase(0, 4 + len);
-    }
+    if (len > kMaxFrame) throw ProtocolError();
+    if (buffer.size() < 4 + len) break; // 半包，继续等数据
+    handle_frame(buffer.substr(4, len));
+    buffer.erase(0, 4 + len);
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“半包解析器怎么设计？”，底层可以从下面几层理解：
+- 半包解析器的核心是应用层 framing。TCP 只给字节流，不知道一个业务包是否已经完整到达。
+- 常见做法是固定头部保存长度，读取时先判断头部是否完整，再判断 body 是否完整，不完整就留在缓冲区等待下次读。
+- 必须限制最大包长，否则恶意长度字段会导致内存被撑爆；解析成功后要从缓冲区消费已处理字节，保留剩余字节。
+- 底层追问会落到读事件触发多次、一次 read 读到多个包、短读、EAGAIN 和连接关闭时缓冲区残留怎么处理。
 
 ### 面试回答版
 
@@ -14488,12 +15370,21 @@ if (buffer.size() >= 4) {
 ### 代码/伪代码示例
 
 ```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+针对：服务端优雅关闭怎么做？
+accept -> set_nonblock -> epoll add
+read event -> read buffer -> parse HTTP
+business -> thread pool
+write event -> output buffer -> keep-alive or close
+timeout timer -> close idle connection
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“服务端优雅关闭怎么做？”，底层可以从下面几层理解：
+- 优雅关闭不是直接 kill 进程，而是停止接收新连接、让存量请求在 deadline 内完成、拒绝或转移新流量，再释放资源。
+- 网络层要 close listen fd 或从负载均衡摘除实例；应用层要停止投递新任务，等待线程池和队列清空或超时取消。
+- 连接层要处理半关闭、写缓冲剩余数据和长连接空闲连接；超过 deadline 仍未完成的请求要明确中断策略。
+- 工程上还要保证信号处理安全、重复关闭幂等、日志落盘、指标上报和回滚时能重新拉起。
 
 ### 面试回答版
 
@@ -14545,12 +15436,21 @@ if (buffer.size() >= 4) {
 ### 代码/伪代码示例
 
 ```text
-先写一个最小例子验证结论，再把它推广到面试回答。
+针对：限速和背压有什么区别？
+accept -> set_nonblock -> epoll add
+read event -> read buffer -> parse HTTP
+business -> thread pool
+write event -> output buffer -> keep-alive or close
+timeout timer -> close idle connection
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，综合题通常不是单点知识，而是让你把机制、场景和取舍连起来。先定边界，再讲实现，最后说验证方式。
+围绕“限速和背压有什么区别？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -14601,18 +15501,22 @@ if (buffer.size() >= 4) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：连接池有什么坑？
+accept -> set_nonblock -> epoll add
+read event -> read buffer -> parse HTTP
+business -> thread pool
+write event -> output buffer -> keep-alive or close
+timeout timer -> close idle connection
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“连接池有什么坑？”，底层可以从下面几层理解：
+- 这题属于网络题，围绕 `连接池有什么坑？` 要区分传输层保证、应用层协议和服务端工程处理。
+- TCP 负责可靠有序字节流，但消息边界、超时策略、鉴权、重试和幂等通常要由应用层协议或业务逻辑处理。
+- 底层常见资源包括 socket 缓冲区、半连接队列、accept 队列、epoll 就绪队列和用户态读写缓冲。
+- 工程答案要补失败路径：超时、半包、断连、慢客户端、写缓冲堆积、下游阻塞和优雅关闭。
 
 ### 面试回答版
 
@@ -14663,18 +15567,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：DNS 负载均衡有什么问题？
+浏览器缓存 -> hosts -> 本地递归 DNS -> 根 DNS -> TLD DNS -> 权威 DNS
+常见记录：A / AAAA / CNAME / MX / TXT
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“DNS 负载均衡有什么问题？”，底层可以从下面几层理解：
+- 网络工程题要从连接生命周期讲：解析地址、建连、读写缓冲、协议解析、业务处理、超时关闭和异常回收。
+- 服务端连接数上不去常见瓶颈包括 fd 限制、listen backlog、SYN 队列、accept 速度、内存、线程/事件循环能力和下游处理速度。
+- 心跳和 keepalive 不是一回事：TCP keepalive 发现死连接较慢，业务心跳可以携带应用状态并按业务超时控制。
+- 背压是下游处理不过来时向上游传递压力，避免内存无限涨；只限速不背压，队列仍可能越积越多。
 
 ### 面试回答版
 
@@ -14725,23 +15630,19 @@ while (need_write > 0) {
 
 ### 代码/伪代码示例
 
-```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+```text
+针对：WebSocket 和 HTTP 长轮询区别？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
+围绕“WebSocket 和 HTTP 长轮询区别？”，底层可以从下面几层理解：
+- HTTP 是应用层语义，TLS 负责加密、完整性和身份认证，TCP 负责可靠字节流。
+- HTTPS 握手会验证证书链和域名，再协商会话密钥；大流量数据使用对称加密传输。
+- HTTP/2 的多路复用在一个 TCP 连接上复用多个流，但仍受 TCP 层队头阻塞影响；HTTP/3 把传输能力移到 QUIC。
 
 ### 面试回答版
 
@@ -14792,20 +15693,19 @@ TCP 只保证一条可靠字节流，不知道你的业务消息从哪里开始�
 
 ### 代码/伪代码示例
 
-```cpp
-// 网络读写不要假设一次读完或一次写完
-while (need_write > 0) {
-    ssize_t n = write(fd, data, need_write);
-    if (n > 0) { data += n; need_write -= n; }
-    else break;
-}
+```text
+针对：QUIC 相比 TCP+TLS 有什么优势？
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，网络代码的关键是内核 socket 缓冲区、状态机、重传、拥塞控制和应用层协议边界。服务端 bug 常常不是协议不会背，而是缓冲区和状态没处理好。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“QUIC 相比 TCP+TLS 有什么优势？”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -14857,18 +15757,20 @@ TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。�
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
-SELECT user_id, created_at
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+-- 针对：MySQL redo log 和 undo log 区别？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MySQL redo log 和 undo log 区别？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -14920,17 +15822,20 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+-- 针对：binlog 和 redo log 区别？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“binlog 和 redo log 区别？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -14982,17 +15887,21 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+-- 针对：两阶段提交解决什么？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“两阶段提交解决什么？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `两阶段提交解决什么？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15044,15 +15953,22 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
-START TRANSACTION;
-SELECT * FROM account WHERE id = 1; -- 快照读
-SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
-COMMIT;
+-- 针对：脏读、不可重复读、幻读区别？
+-- 不可重复读示意：
+-- T1: BEGIN; SELECT balance FROM account WHERE id=1;
+-- T2: UPDATE account SET balance=balance+100 WHERE id=1; COMMIT;
+-- T1: SELECT balance FROM account WHERE id=1; -- 同一行两次读取结果不同
+
+-- 幻读关注范围内“新增/消失的行”，不是同一行值变化。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“脏读、不可重复读、幻读区别？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `脏读、不可重复读、幻读区别？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15104,18 +16020,20 @@ COMMIT;
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
-SELECT user_id, created_at
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+-- 针对：MySQL 默认隔离级别是什么？
+START TRANSACTION;
+SELECT * FROM account WHERE id = 1;            -- 快照读
+SELECT * FROM account WHERE id = 1 FOR UPDATE; -- 当前读，加锁
+UPDATE account SET balance = balance - 100 WHERE id = 1;
+COMMIT;
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MySQL 默认隔离级别是什么？”，底层可以从下面几层理解：
+- undo log 形成历史版本链，read view 决定当前事务能看到哪些版本。
+- redo log 保障崩溃恢复后的持久性，binlog 用于复制和逻辑恢复，两阶段提交协调二者一致。
+- 快照读依赖 MVCC；当前读要读最新版本并加锁，范围当前读需要 gap/next-key lock 防止插入幻影行。
 
 ### 面试回答版
 
@@ -15167,17 +16085,25 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
+-- 针对：count(*)、count(1)、count(column) 区别？
+EXPLAIN
+SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“count(*)、count(1)、count(column) 区别？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `count(*)、count(1)、count(column) 区别？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15229,17 +16155,25 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
+-- 针对：深分页为什么慢？
+EXPLAIN
+SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“深分页为什么慢？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `深分页为什么慢？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15291,20 +16225,24 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：覆盖索引为什么快？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载页。B+ 树扇出高，树高通常较低，所以一次查找需要的随机 IO 更少。
+围绕“覆盖索引为什么快？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -15356,20 +16294,24 @@ InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
+-- 针对：索引下推 ICP 是什么？
+EXPLAIN
 SELECT user_id, created_at
 FROM orders
 WHERE user_id = 10
 ORDER BY created_at
 LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+
+-- 联合索引示例：(user_id, created_at)
+-- 观察 type/key/rows/Extra，判断是否回表、排序或扫描过多
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载页。B+ 树扇出高，树高通常较低，所以一次查找需要的随机 IO 更少。
+围绕“索引下推 ICP 是什么？”，底层可以从下面几层理解：
+- InnoDB 以页为基本 IO 单位，B+ 树节点对应页或页内结构，扇出高使树高较低。
+- 聚簇索引叶子节点保存整行；二级索引叶子节点保存索引列和主键，因此查非索引列可能回表。
+- 联合索引按列顺序排序，最左前缀本质是只能利用连续有序前缀缩小搜索范围。
 
 ### 面试回答版
 
@@ -15420,19 +16362,22 @@ InnoDB 的索引节点按页组织，查询不是访问单个 key，而是加载
 
 ### 代码/伪代码示例
 
-```sql
--- 联合索引：(user_id, created_at)
-SELECT user_id, created_at
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+```cpp
+// 针对：MySQL 死锁怎么处理？
+std::mutex a, b;
+void safe_update() {
+    std::scoped_lock lk(a, b); // 一次锁多把，降低手写顺序导致死锁的风险
+    // update shared state
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MySQL 死锁怎么处理？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `MySQL 死锁怎么处理？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15483,21 +16428,24 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 
 ### 代码/伪代码示例
 
-```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+```cpp
+// 针对：Redis 单线程为什么还能高并发？
+pid_t pid = fork();
+if (pid == 0) {
+    // child
+    _exit(0);
+} else if (pid > 0) {
+    int status = 0;
+    waitpid(pid, &status, 0); // 回收子进程，避免僵尸进程
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 单线程为什么还能高并发？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -15549,20 +16497,21 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 大 key 有什么问题？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 大 key 有什么问题？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -15614,20 +16563,21 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 热 key 怎么发现和处理？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 热 key 怎么发现和处理？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -15679,20 +16629,21 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```text
-SET lock:order:1 unique_value NX EX 10
-
--- 释放锁用 Lua：先判断 value 是自己的，再 DEL
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
-end
-return 0
+针对：Redis 删除大 key 用 DEL 还是 UNLINK？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis 删除大 key 用 DEL 还是 UNLINK？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -15743,20 +16694,23 @@ Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令
 
 ### 代码/伪代码示例
 
-```cpp
-if (!bloom.mightContain(key)) {
-    return NotFound; // 拦截明显不存在的数据
-}
-auto val = cache.get(key);
-if (!val) {
-    val = load_from_db_with_mutex(key);
-    cache.set(key, val, ttl_with_jitter());
-}
+```text
+针对：布隆过滤器原理？
+读缓存流程：
+1. 参数校验/布隆过滤器
+2. GET cache_key
+3. 未命中时互斥回源 DB
+4. SET cache_key value EX ttl_with_jitter
+5. 热点 key 可用逻辑过期或本地缓存
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“布隆过滤器原理？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `布隆过滤器原理？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -15808,24 +16762,19 @@ Redis 快不代表所有命令都快。大 key、慢 Lua、阻塞命令会让单
 ### 代码/伪代码示例
 
 ```cpp
-for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n > 0) {
-        append_to_input_buffer(buf, n);
-    } else if (n == -1 && errno == EAGAIN) {
-        break; // 非阻塞 fd 已经读空
-    } else {
-        close_connection(fd);
-        break;
-    }
-}
+// 针对：Redis sorted set 为什么适合排行榜？
+std::set<int> s{1, 3, 5};
+// 不能直接把 3 改成 4；key 变化会破坏树顺序
+s.erase(3);
+s.insert(4);
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
-
-Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令会占住事件循环，让其他连接也等待，所以 Redis 快的前提是单次命令足够短。
+围绕“Redis sorted set 为什么适合排行榜？”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -15877,14 +16826,21 @@ Redis 命令执行主路径通常在事件循环中完成。大 key 或慢命令
 ### 代码/伪代码示例
 
 ```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+-- 针对：MQ 如何保证消息不丢？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MQ 如何保证消息不丢？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -15936,14 +16892,21 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 ### 代码/伪代码示例
 
 ```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+-- 针对：MQ 重复消费怎么处理？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“MQ 重复消费怎么处理？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -15995,14 +16958,21 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 ### 代码/伪代码示例
 
 ```sql
--- 用唯一业务键保证重复消息不会重复生效
-INSERT INTO processed_msg(message_id) VALUES (?);
--- 如果唯一键冲突，说明处理过，直接 ack
+-- 针对：顺序消息怎么保证？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“顺序消息怎么保证？”，底层可以从下面几层理解：
+- MQ 的可靠性不是单点保证，而是生产确认、Broker 持久化/副本、消费 ack 和重试共同组成。
+- 大多数系统更容易提供至少一次投递，所以消费端幂等是必需的。
+- 顺序消息通常只能保证同一 key/分区内有序，全局有序会显著牺牲吞吐。
 
 ### 面试回答版
 
@@ -16054,17 +17024,22 @@ INSERT INTO processed_msg(message_id) VALUES (?);
 ### 代码/伪代码示例
 
 ```sql
-EXPLAIN SELECT *
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 先看执行计划，再判断索引是否合适
+-- 针对：延迟队列怎么实现？
+CREATE TABLE processed_msg (
+  message_id VARCHAR(64) PRIMARY KEY,
+  processed_at TIMESTAMP
+);
+
+-- 消费前先插入 message_id；唯一键冲突说明处理过，直接 ack
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，数据库问题往往落到页、B+ 树、undo/redo 日志、锁、事务可见性和执行计划。要能把一个 SQL 从索引扫描到回表再到加锁讲出来。
+围绕“延迟队列怎么实现？”，底层可以从下面几层理解：
+- 这题属于数据库题，回答 `延迟队列怎么实现？` 时要把逻辑 SQL、索引结构、锁/MVCC 和日志恢复分层。
+- 查询快慢通常不是 SQL 文本本身决定，而是访问路径、扫描行数、回表次数、排序/临时表和缓冲池命中共同决定。
+- 事务一致性依赖锁、MVCC、undo/redo/binlog 等机制协作；不同读方式和隔离级别会看到不同版本或加不同锁。
+- 面试里要主动说如何验证：EXPLAIN 看访问路径，慢日志看耗时，show engine innodb status 看死锁和锁等待。
 
 ### 面试回答版
 
@@ -16116,24 +17091,27 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：线程池为什么不能无限加线程？
 while (true) {
     std::function<void()> task;
     {
         std::unique_lock<std::mutex> lk(mu);
-        cv.wait(lk, [&]{ return stopped || !tasks.empty(); });
+        cv.wait(lk, [&] { return stopped || !tasks.empty(); });
         if (stopped && tasks.empty()) break;
         task = std::move(tasks.front());
         tasks.pop();
     }
-    task();
+    task(); // 不要持锁执行任务
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-线程池底层依赖条件变量的阻塞/唤醒和任务队列的互斥保护。真正容易错的是停止状态与队列状态的组合，而不是创建线程本身。
+围绕“线程池为什么不能无限加线程？”，底层可以从下面几层理解：
+- 线程池底层是固定 worker、任务队列、条件变量和停止标志的组合。
+- worker 不能持锁执行任务，否则任务耗时会阻塞其他线程取任务。
+- 退出条件必须同时看 `stopped` 和队列是否为空，否则会丢任务或无法退出。
+- 工程版本还要考虑队列容量、拒绝策略、慢任务隔离和任务异常传播。
 
 ### 面试回答版
 
@@ -16185,14 +17163,25 @@ while (true) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：任务队列为什么不能无限长？
+bool push(Task t) {
+    std::unique_lock<std::mutex> lk(mu);
+    not_full.wait(lk, [&] { return stopped || q.size() < max_size; });
+    if (stopped) return false;
+    q.push(std::move(t));
+    not_empty.notify_one();
+    return true;
+}
+// 有上限才能形成背压；无限队列只会把过载变成内存上涨和延迟上涨。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“任务队列为什么不能无限长？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `任务队列为什么不能无限长？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16244,14 +17233,22 @@ while (true) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：定时器怎么设计？
+using Clock = std::chrono::steady_clock;
+struct Timer { Clock::time_point expire; int fd; };
+auto cmp = [](const Timer& a, const Timer& b) { return a.expire > b.expire; };
+std::priority_queue<Timer, std::vector<Timer>, decltype(cmp)> heap(cmp);
+
+// 每轮事件循环取堆顶，过期就执行/关闭连接，未过期就作为 poll/epoll timeout。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“定时器怎么设计？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `定时器怎么设计？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16303,7 +17300,8 @@ LRU 同时需要快速查找和快速调整新旧顺序，所以用哈希表加�
 ### 代码/伪代码示例
 
 ```cpp
-// map: key -> list iterator
+// 针对：LRU 和 LFU 区别？
+// unordered_map: key -> list iterator
 // list front: 最近使用；list back: 最久未使用
 auto it = pos.find(key);
 if (it != pos.end()) {
@@ -16313,7 +17311,10 @@ if (it != pos.end()) {
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“LRU 和 LFU 区别？”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -16365,16 +17366,18 @@ if (it != pos.end()) {
 ### 代码/伪代码示例
 
 ```cpp
-std::unordered_map<std::string, int> cnt;
-cnt.reserve(1000); // 已知规模时减少 rehash
-for (auto& s : words) {
-    ++cnt[s];
-}
+// 针对：一致性哈希为什么要虚拟节点？
+auto it = ring.lower_bound(hash(key));
+if (it == ring.end()) it = ring.begin();
+Node* target = it->second; // key 顺时针找到第一个虚拟节点
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“一致性哈希为什么要虚拟节点？”，底层可以从下面几层理解：
+- `map` 常用红黑树满足稳定 O(log n) 和有序遍历；节点式结构让插入通常不移动已有节点。
+- `unordered_map` 用桶数组加冲突处理，平均 O(1) 依赖哈希分布和负载因子。
+- rehash 会重建桶数组并重新分布元素，所以迭代器会失效，也可能造成某次插入抖动。
 
 ### 面试回答版
 
@@ -16425,15 +17428,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：配置热更新怎么做？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“配置热更新怎么做？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `配置热更新怎么做？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16485,14 +17496,22 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：日志级别怎么设计？
+enum class LogLevel { Trace, Debug, Info, Warn, Error, Fatal };
+
+bool should_log(LogLevel msg, LogLevel threshold) {
+    return static_cast<int>(msg) >= static_cast<int>(threshold);
+}
+// 线上通常默认 Info/Warn，排查问题时临时打开 Debug，避免热路径刷爆 IO。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“日志级别怎么设计？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `日志级别怎么设计？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16544,14 +17563,20 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：如何设计一个简单内存池？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计一个简单内存池？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计一个简单内存池？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16603,14 +17628,20 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：如何设计一个对象池？
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计一个对象池？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计一个对象池？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16662,14 +17693,23 @@ for (auto& s : words) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：如何设计限流器？
+tokens = std::min(capacity, tokens + rate * elapsed_seconds);
+if (tokens >= 1) {
+    tokens -= 1;
+    allow();
+} else {
+    reject_or_wait();
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计限流器？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计限流器？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16720,15 +17760,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何设计一个排行榜？
+Redis sorted set:
+ZADD rank 9800 user:1
+ZREVRANGE rank 0 9 WITHSCORES
+ZREVRANK rank user:1
+
+底层学习重点：score 排序、同分处理、分页稳定性、热榜缓存和数据修正。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计一个排行榜？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计一个排行榜？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16779,15 +17827,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何设计短链接系统？
+long_url -> normalize -> hash/base62 -> short_code
+写入：short_code 唯一索引，冲突就加盐重试
+读取：短码查表 -> 301/302 跳转 -> 记录访问日志
+重点：唯一性、过期、风控、缓存和热点短码。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计短链接系统？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计短链接系统？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16838,15 +17892,19 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何设计秒杀系统？
+入口限流 -> 风控校验 -> Redis 预扣库存 -> MQ 异步下单 -> DB 最终扣减
+失败补偿：预扣超时回滚；重复请求用 user_id+sku_id 幂等键挡住。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计秒杀系统？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计秒杀系统？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16897,15 +17955,20 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何设计登录态？
+登录成功 -> 生成 session/token -> 写 Redis/签名 JWT -> Set-Cookie
+请求校验 -> 验签/查 Redis -> 检查过期、撤销、设备、权限
+退出登录 -> 删除 session 或写入 token 黑名单。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何设计登录态？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何设计登录态？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -16956,15 +18019,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：接口超时怎么设计？
+deadline = caller_timeout - network_budget
+重试：只重试幂等请求，指数退避 + 抖动 + 最大次数
+熔断：错误率/慢调用超过阈值 -> 打开 -> 半开探测 -> 恢复或继续打开
+降级：返回缓存、默认值或关闭非核心能力。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“接口超时怎么设计？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `接口超时怎么设计？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17015,15 +18084,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：重试有什么风险？
+deadline = caller_timeout - network_budget
+重试：只重试幂等请求，指数退避 + 抖动 + 最大次数
+熔断：错误率/慢调用超过阈值 -> 打开 -> 半开探测 -> 恢复或继续打开
+降级：返回缓存、默认值或关闭非核心能力。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“重试有什么风险？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `重试有什么风险？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17074,15 +18149,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：熔断和降级区别？
+deadline = caller_timeout - network_budget
+重试：只重试幂等请求，指数退避 + 抖动 + 最大次数
+熔断：错误率/慢调用超过阈值 -> 打开 -> 半开探测 -> 恢复或继续打开
+降级：返回缓存、默认值或关闭非核心能力。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“熔断和降级区别？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `熔断和降级区别？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17133,15 +18214,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何做灰度发布？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何做灰度发布？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何做灰度发布？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17192,15 +18281,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：数据库迁移如何避免停机？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“数据库迁移如何避免停机？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `数据库迁移如何避免停机？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17251,15 +18348,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：线上问题复盘应该包含什么？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“线上问题复盘应该包含什么？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `线上问题复盘应该包含什么？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17310,15 +18415,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```bash
+# 针对：如何评价一个接口的性能？
+wrk -t4 -c200 -d30s --latency http://127.0.0.1:8080/api
+pidstat -urd -p <pid> 1
+perf record -F 99 -p <pid> -g -- sleep 30
+# 同时记录 QPS、P50/P95/P99、错误率、CPU、内存、IO 和下游耗时。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何评价一个接口的性能？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何评价一个接口的性能？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17369,15 +18480,21 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```bash
+# 针对：为什么 P99 重要？
+wrk -t4 -c200 -d30s http://127.0.0.1:8080/
+perf record -F 99 -p <pid> -g -- sleep 30
+perf report
+# 记录 QPS、P95/P99、CPU、内存、上下文切换
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“为什么 P99 重要？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `为什么 P99 重要？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17428,15 +18545,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何写一个可测试的 C++ 模块？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何写一个可测试的 C++ 模块？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何写一个可测试的 C++ 模块？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17487,15 +18612,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：代码 review 重点看什么？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“代码 review 重点看什么？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `代码 review 重点看什么？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17546,15 +18679,22 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：C++ 项目如何减少编译时间？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“C++ 项目如何减少编译时间？”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -17605,15 +18745,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：ABI 兼容是什么？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“ABI 兼容是什么？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `ABI 兼容是什么？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17664,15 +18812,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何处理跨平台差异？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何处理跨平台差异？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何处理跨平台差异？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17723,15 +18879,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何避免头文件循环依赖？
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何避免头文件循环依赖？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何避免头文件循环依赖？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17782,15 +18946,22 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：面试手撕代码时不会最优解怎么办？
+回答结构：
+背景：项目目标/约束是什么
+动作：你做了哪一块，为什么这样选
+证据：指标、日志、压测或 bug 复盘
+边界：不足、替代方案、下一步优化
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“面试手撕代码时不会最优解怎么办？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `面试手撕代码时不会最优解怎么办？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17841,15 +19012,23 @@ for (auto& s : words) {
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：如何把八股答案讲得像工程经验？
+结论：先回答是什么。
+机制：解释为什么这样设计。
+工程：说你在项目/排查/压测里怎么验证。
+边界：补一句什么时候不适用。
+
+示例：不是“epoll 很快”，而是“epoll 把关注集合留在内核，就绪时放入就绪队列，适合大量连接少量活跃”。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“如何把八股答案讲得像工程经验？”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `如何把八股答案讲得像工程经验？` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -17957,7 +19136,8 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// map: key -> list iterator
+// 针对：LRU Cache
+// unordered_map: key -> list iterator
 // list front: 最近使用；list back: 最久未使用
 auto it = pos.find(key);
 if (it != pos.end()) {
@@ -17967,7 +19147,10 @@ if (it != pos.end()) {
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“LRU Cache”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -18078,18 +19261,23 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：阻塞队列
 std::unique_lock<std::mutex> lk(mu);
-cv.wait(lk, [&] {
-    return stopped || !queue.empty();
+not_empty.wait(lk, [&] {
+    return closed || !queue.empty();
 });
-if (stopped && queue.empty()) return;
-auto task = std::move(queue.front());
+if (queue.empty() && closed) return false;
+out = std::move(queue.front());
 queue.pop();
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“阻塞队列”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `阻塞队列` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -18221,24 +19409,27 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：线程池
 while (true) {
     std::function<void()> task;
     {
         std::unique_lock<std::mutex> lk(mu);
-        cv.wait(lk, [&]{ return stopped || !tasks.empty(); });
+        cv.wait(lk, [&] { return stopped || !tasks.empty(); });
         if (stopped && tasks.empty()) break;
         task = std::move(tasks.front());
         tasks.pop();
     }
-    task();
+    task(); // 不要持锁执行任务
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-线程池底层依赖条件变量的阻塞/唤醒和任务队列的互斥保护。真正容易错的是停止状态与队列状态的组合，而不是创建线程本身。
+围绕“线程池”，底层可以从下面几层理解：
+- 线程池底层是固定 worker、任务队列、条件变量和停止标志的组合。
+- worker 不能持锁执行任务，否则任务耗时会阻塞其他线程取任务。
+- 退出条件必须同时看 `stopped` 和队列是否为空，否则会丢任务或无法退出。
+- 工程版本还要考虑队列容量、拒绝策略、慢任务隔离和任务异常传播。
 
 ### 面试回答版
 
@@ -18360,14 +19551,22 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：定时器小根堆
+using Clock = std::chrono::steady_clock;
+struct Timer { Clock::time_point expire; int fd; };
+auto cmp = [](const Timer& a, const Timer& b) { return a.expire > b.expire; };
+std::priority_queue<Timer, std::vector<Timer>, decltype(cmp)> heap(cmp);
+
+// 每轮事件循环取堆顶，过期就执行/关闭连接，未过期就作为 poll/epoll timeout。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“定时器小根堆”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `定时器小根堆` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -18462,21 +19661,22 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// 4 字节长度 + body
-if (buffer.size() >= 4) {
+// 针对：TCP 半包解析器
+while (buffer.size() >= 4) {
     uint32_t len = read_uint32_be(buffer.data());
-    if (buffer.size() >= 4 + len) {
-        std::string frame = buffer.substr(4, len);
-        buffer.erase(0, 4 + len);
-    }
+    if (len > kMaxFrame) throw ProtocolError();
+    if (buffer.size() < 4 + len) break; // 半包，继续等数据
+    handle_frame(buffer.substr(4, len));
+    buffer.erase(0, 4 + len);
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-TCP 的可靠性依赖序列号、ACK、重传、滑动窗口和拥塞控制。应用层看到的是有序字节流，但内核内部维护发送/接收缓冲区和连接状态机。
+围绕“TCP 半包解析器”，底层可以从下面几层理解：
+- TCP 内核维护发送缓冲区、接收缓冲区和连接状态机，应用看到的是有序字节流。
+- 可靠性来自序列号、ACK、重传、滑动窗口、流量控制和拥塞控制，不来自应用层消息边界。
+- 粘包/半包的根因是 TCP 不保留应用消息边界，因此必须在应用协议里加长度、分隔符或固定格式。
 
 ### 面试回答版
 
@@ -18569,6 +19769,7 @@ int kmpSearch(const std::string& s, const std::string& p) {
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：KMP
 while (i < text.size()) {
     if (text[i] == pat[j]) { ++i; ++j; }
     else if (j > 0) j = lps[j - 1];
@@ -18578,7 +19779,10 @@ while (i < text.size()) {
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“KMP”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -18666,6 +19870,7 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：并查集
 int find(int x) {
     if (parent[x] != x) parent[x] = find(parent[x]);
     return parent[x];
@@ -18674,7 +19879,10 @@ int find(int x) {
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“并查集”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -18776,14 +19984,22 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：Trie 前缀树
+struct Node {
+    std::array<int, 26> next{};
+    bool end = false;
+};
+std::vector<Node> trie(1);
+
+// insert 时沿字符建边；search/prefix 时沿边走，走不到就失败。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“Trie 前缀树”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -18887,14 +20103,20 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：简化内存池
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“简化内存池”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `简化内存池` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -18984,14 +20206,20 @@ private:
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：最小可用对象池
+std::byte buffer[4096];
+std::pmr::monotonic_buffer_resource pool(buffer, sizeof(buffer));
+std::pmr::vector<int> v{&pool};
+v.reserve(100); // 元素内存从指定 memory_resource 获取
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“最小可用对象池”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `最小可用对象池` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -19064,14 +20292,25 @@ int lowerBound(const std::vector<int>& a, int target) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：二分查找统一模板
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
+};
+
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“二分查找统一模板”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `二分查找统一模板` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -19159,14 +20398,19 @@ std::vector<int> topoSort(int n, const std::vector<std::pair<int, int>>& edges) 
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：拓扑排序
+std::vector<std::pair<int, char>> v{{1,'a'}, {1,'b'}, {0,'c'}};
+std::stable_sort(v.begin(), v.end(),
+    [](auto& x, auto& y) { return x.first < y.first; });
+// first 相等时，a 和 b 的相对顺序保持
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“拓扑排序”，底层可以从下面几层理解：
+- 算法题底层要抓不变量：LRU 的新旧顺序、KMP 的前后缀长度、并查集的父节点代表元、DP 的状态含义。
+- 代码是否正确，取决于每次操作后不变量是否仍成立。
+- 面试中先讲不变量，再讲复杂度，比直接贴代码更容易让面试官相信你理解了。
 
 ### 面试回答版
 
@@ -19238,14 +20482,23 @@ int lengthOfLIS(const std::vector<int>& nums) {
 ### 代码/伪代码示例
 
 ```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+// 针对：最长递增子序列 O(n log n)
+std::vector<int> tails;
+for (int x : nums) {
+    auto it = std::lower_bound(tails.begin(), tails.end(), x);
+    if (it == tails.end()) tails.push_back(x);
+    else *it = x;
+}
+// tails[i] 表示长度为 i+1 的递增子序列结尾最小值。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“最长递增子序列 O(n log n)”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `最长递增子序列 O(n log n)` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -19309,15 +20562,22 @@ get 和 put 都是 O(1)，容量为 0 时直接忽略 put。
 
 ### 代码/伪代码示例
 
-```cpp
-// 写代码题时先写不变量
-// invariant: size <= capacity
-// invariant: map 中的迭代器都指向 list 中有效节点
+```text
+针对：回答代码题的固定结构
+1. 复述输入输出和边界。
+2. 说暴力解，给复杂度。
+3. 说优化依据：哈希/双指针/堆/DP/图。
+4. 写代码时同步讲不变量。
+5. 用 2 个样例和 1 个边界用例自测。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
+围绕“回答代码题的固定结构”，底层可以从下面几层理解：
+- 这题属于手撕代码/设计题，围绕 `回答代码题的固定结构` 的底层关键是数据结构不变量，而不是先追求最短代码。
+- 写之前先定义状态：数组/链表/堆/哈希表里分别保存什么，哪些关系必须一直成立。
+- 每个操作后都要维护不变量，并用边界用例验证：空输入、一个元素、重复元素、容量满、删除不存在元素等。
+- 复杂度分析要同时说时间和空间，涉及哈希、堆、树时还要说明平均/最坏情况差异。
 
 ### 面试回答版
 
@@ -19387,14 +20647,25 @@ get 和 put 都是 O(1)，容量为 0 时直接忽略 put。
 
 ### 代码/伪代码示例
 
-```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+```cpp
+// 针对：项目介绍模板
+template <class T>
+concept Addable = requires(T a, T b) {
+    a + b;
+};
+
+template <Addable T>
+T add(T a, T b) {
+    return a + b;
+}
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“项目介绍模板”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -19484,13 +20755,20 @@ get 和 put 都是 O(1)，容量为 0 时直接忽略 put。
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：WebServer 项目追问链
+accept -> set_nonblock -> epoll add
+read event -> read buffer -> parse HTTP
+business -> thread pool
+write event -> output buffer -> keep-alive or close
+timeout timer -> close idle connection
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“WebServer 项目追问链”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -19554,24 +20832,27 @@ get 和 put 都是 O(1)，容量为 0 时直接忽略 put。
 ### 代码/伪代码示例
 
 ```cpp
+// 针对：线程池项目追问链
 while (true) {
     std::function<void()> task;
     {
         std::unique_lock<std::mutex> lk(mu);
-        cv.wait(lk, [&]{ return stopped || !tasks.empty(); });
+        cv.wait(lk, [&] { return stopped || !tasks.empty(); });
         if (stopped && tasks.empty()) break;
         task = std::move(tasks.front());
         tasks.pop();
     }
-    task();
+    task(); // 不要持锁执行任务
 }
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，代码题要抓不变量和边界。每次插入、删除、移动、扩容、退出，都必须维护数据结构不变量，否则复杂度再好也不可靠。
-
-线程池底层依赖条件变量的阻塞/唤醒和任务队列的互斥保护。真正容易错的是停止状态与队列状态的组合，而不是创建线程本身。
+围绕“线程池项目追问链”，底层可以从下面几层理解：
+- 线程池底层是固定 worker、任务队列、条件变量和停止标志的组合。
+- worker 不能持锁执行任务，否则任务耗时会阻塞其他线程取任务。
+- 退出条件必须同时看 `stopped` 和队列是否为空，否则会丢任务或无法退出。
+- 工程版本还要考虑队列容量、拒绝策略、慢任务隔离和任务异常传播。
 
 ### 面试回答版
 
@@ -19635,13 +20916,18 @@ while (true) {
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：缓存项目追问链
+HTTP 请求处理：parse request line -> parse headers -> read body -> route -> response
+HTTPS 握手重点：证书校验 -> 密钥协商 -> 对称加密传输
+缓存重点：Cache-Control / ETag / Last-Modified
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“缓存项目追问链”，底层可以从下面几层理解：
+- Redis 快的前提是单条命令短小，主事件循环不能被大 key、慢 Lua 或阻塞命令占住太久。
+- RDB 是时间点快照，AOF 是写命令日志；一个偏恢复速度和体积，一个偏持久性粒度。
+- 缓存问题要看失败路径：不存在数据穿透、热点过期击穿、大量 key 同时失效雪崩、故障切换导致锁语义变弱。
 
 ### 面试回答版
 
@@ -19701,18 +20987,19 @@ while (true) {
 ### 代码/伪代码示例
 
 ```sql
--- 联合索引：(user_id, created_at)
-SELECT user_id, created_at
-FROM orders
-WHERE user_id = 10
-ORDER BY created_at
-LIMIT 20;
--- 查询列都在索引里时，有机会形成覆盖索引
+-- 针对：MySQL 项目追问链
+EXPLAIN SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20;
+SHOW ENGINE INNODB STATUS\G
+SHOW VARIABLES LIKE 'transaction_isolation';
+-- 项目追问要能从 SQL、索引、事务、锁等待、慢日志一路讲到业务取舍。
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“MySQL 项目追问链”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -19802,13 +21089,21 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：45 分钟真人感模拟面试脚本
+回答结构：
+背景：项目目标/约束是什么
+动作：你做了哪一块，为什么这样选
+证据：指标、日志、压测或 bug 复盘
+边界：不足、替代方案、下一步优化
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“45 分钟真人感模拟面试脚本”，底层可以从下面几层理解：
+- 这题属于项目题，围绕 `45 分钟真人感模拟面试脚本` 要把背景、约束、方案、指标和复盘连起来，而不是只说用了某个技术。
+- 底层要落到请求链路：入口、鉴权、限流、业务处理、缓存/数据库/MQ、返回、日志和监控。
+- 能体现真实性的是证据：压测数据、线上指标、一次 bug、一个权衡、一个没选的方案。
+- 回答时要控制边界，先讲自己负责的部分，再承认系统限制和下一步优化，避免被引到完全没做过的方向。
 
 ### 面试回答版
 
@@ -19878,13 +21173,21 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：回答不会的问题
+回答结构：
+背景：项目目标/约束是什么
+动作：你做了哪一块，为什么这样选
+证据：指标、日志、压测或 bug 复盘
+边界：不足、替代方案、下一步优化
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“回答不会的问题”，底层可以从下面几层理解：
+- 这题属于项目题，围绕 `回答不会的问题` 要把背景、约束、方案、指标和复盘连起来，而不是只说用了某个技术。
+- 底层要落到请求链路：入口、鉴权、限流、业务处理、缓存/数据库/MQ、返回、日志和监控。
+- 能体现真实性的是证据：压测数据、线上指标、一次 bug、一个权衡、一个没选的方案。
+- 回答时要控制边界，先讲自己负责的部分，再承认系统限制和下一步优化，避免被引到完全没做过的方向。
 
 ### 面试回答版
 
@@ -19944,13 +21247,20 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：高频项目风险点
+风险清单：
+容量：峰值 QPS、队列长度、连接数
+一致性：重复请求、重试、消息补偿
+可观测：日志、指标、trace、告警
+恢复：超时、限流、降级、回滚
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“高频项目风险点”，底层可以从下面几层理解：
+- 项目题的底层是请求生命周期：连接建立、读缓冲、解析、业务执行、写缓冲、关闭和超时。
+- 性能优化必须落到证据链：指标、工具、热点、改动、结果和副作用。
+- 高并发不是口号，最终会落到 fd 限制、内核队列、事件循环、线程池、下游容量和背压。
 
 ### 面试回答版
 
@@ -20010,13 +21320,22 @@ LIMIT 20;
 ### 代码/伪代码示例
 
 ```text
-请求入口 -> 参数校验 -> 核心处理 -> 下游调用 -> 响应返回
-每一步都补：超时、错误、日志、指标、降级。
+针对：面试后复盘表
+设计检查：
+1. 兼容旧版本
+2. 可灰度、可回滚
+3. 有日志和指标
+4. 失败路径可恢复
+5. 单元测试覆盖核心分支
 ```
 
 ### 底层原理再往下一层
 
-再往下一层看，项目题最终会问到数据流、状态机、资源释放、压测指标、错误恢复和可观测性。能讲清楚这些，比说用了什么框架更重要。
+围绕“面试后复盘表”，底层可以从下面几层理解：
+- 这题属于项目题，围绕 `面试后复盘表` 要把背景、约束、方案、指标和复盘连起来，而不是只说用了某个技术。
+- 底层要落到请求链路：入口、鉴权、限流、业务处理、缓存/数据库/MQ、返回、日志和监控。
+- 能体现真实性的是证据：压测数据、线上指标、一次 bug、一个权衡、一个没选的方案。
+- 回答时要控制边界，先讲自己负责的部分，再承认系统限制和下一步优化，避免被引到完全没做过的方向。
 
 ### 面试回答版
 
@@ -20037,5 +21356,3 @@ LIMIT 20;
 - 压测怎么做？
 - 线上出问题怎么定位？
 - 你负责的边界是什么？
-
----
